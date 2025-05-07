@@ -7,23 +7,31 @@
     { "type": "wokwi-servo", "id": "servo1", "top": -155.6, "left": 9.6, "attrs": {} },
     { "type": "wokwi-servo", "id": "servo2", "top": -117.2, "left": 249.6, "attrs": {} },
     { "type": "wokwi-servo", "id": "servo3", "top": 17.2, "left": 297.6, "attrs": {} },
-    { "type": "wokwi-servo", "id": "servo4", "top": 190, "left": 259.2, "attrs": {} }
+    { "type": "wokwi-servo", "id": "servo4", "top": 190, "left": 259.2, "attrs": {} },
+    { "type": "wokwi-servo", "id": "servo5", "top": 60, "left": 20, "attrs": {} },
+    { "type": "wokwi-servo", "id": "servo6", "top": 100, "left": -60, "attrs": {} }
   ],
   "connections": [
     [ "mega:5V", "servo1:V+", "red", [ "v0" ] ],
     [ "mega:5V", "servo2:V+", "red", [ "v0" ] ],
     [ "mega:5V", "servo3:V+", "red", [ "v0" ] ],
     [ "mega:5V", "servo4:V+", "red", [ "v0" ] ],
-    
+    [ "mega:5V", "servo5:V+", "red", [ "v0" ] ],
+    [ "mega:5V", "servo6:V+", "red", [ "v0" ] ],
+
     [ "mega:6", "servo1:PWM", "green", [ "v0" ] ],
     [ "mega:7", "servo2:PWM", "green", [ "v0" ] ],
     [ "mega:10", "servo3:PWM", "green", [ "v0" ] ],
     [ "mega:9", "servo4:PWM", "green", [ "v0" ] ],
-    
+    [ "mega:8", "servo5:PWM", "green", [ "v0" ] ],
+    [ "mega:11", "servo6:PWM", "green", [ "v0" ] ],
+
     [ "mega:GND.3", "servo1:GND", "black", [ "v0" ] ],
     [ "mega:GND.3", "servo2:GND", "black", [ "v0" ] ],
     [ "mega:GND.3", "servo3:GND", "black", [ "v0" ] ],
-    [ "mega:GND.3", "servo4:GND", "black", [ "v0" ] ]
+    [ "mega:GND.3", "servo4:GND", "black", [ "v0" ] ],
+    [ "mega:GND.3", "servo5:GND", "black", [ "v0" ] ],
+    [ "mega:GND.3", "servo6:GND", "black", [ "v0" ] ]
   ],
   "dependencies": {}
 }

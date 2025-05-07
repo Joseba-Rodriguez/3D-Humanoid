@@ -1,154 +1,143 @@
 #include <Servo.h>
 
-// Definir los servos para cada dedo
+// Servos de la mano
 Servo pulgar;        // Pulgar
 Servo indice;        // Índice
 Servo medio;         // Medio
-Servo anularMenique; // Anular + Meñique (compartido)
+Servo anularMenique; // Anular + Meñique
 
-// Variables de ángulos
+// Servos del brazo
+Servo brazo;   // Brazo (parte media del brazo robótico)
+Servo muneca;  // Muñeca (final del brazo robótico)
+
+// Posiciones actuales
 int pulgarPos = 90;
 int indicePos = 90;
 int medioPos = 90;
 int anularMeniquePos = 90;
+int brazoPos = 90;
 
-// Configuración de la duración de los movimientos (en milisegundos)
+// Tiempo y control aleatorio
 unsigned long tiempoAnterior = 0;
-unsigned long intervalo = 2000; // Inicialmente en 2 segundos (variará)
+unsigned long intervalo = 2000;
 
-// Funciones para generar movimientos aleatorios
 int getRandomAngle() {
-  return random(45, 135);  // Rango de 45° a 135° para movimientos naturales
+  return random(45, 135);
 }
 
 int getRandomDelay() {
-  return random(500, 1500); // Tiempo entre 0.5s y 1.5s para los movimientos
+  return random(500, 1500);
 }
 
 void setup() {
-  // Conectar los servos a los pines correspondientes
+  // Conectar servos de la mano
   pulgar.attach(6);
   indice.attach(7);
   medio.attach(10);
   anularMenique.attach(9);
-  
-  // Inicializamos el puerto serial para monitorear
+
+  // Conectar servos del brazo
+  brazo.attach(8);     // Supón que lo conectaste al pin 8
+  muneca.attach(11);   // Supón que lo conectaste al pin 11
+
+  // Inicialización
   Serial.begin(9600);
-  
-  // Asegurar que la mano comienza en una posición neutral
   abrirMano();
+  moverBrazo(90);  // Inicia el brazo y muñeca en centro
   delay(1000);
 }
 
 void loop() {
   unsigned long tiempoActual = millis();
 
-  // Revisamos si ha pasado el tiempo para el siguiente movimiento aleatorio
   if (tiempoActual - tiempoAnterior >= intervalo) {
-    // Actualizamos el tiempo
     tiempoAnterior = tiempoActual;
     
-    // Elegimos aleatoriamente una acción
     int accion = random(1, 6);
     
     switch (accion) {
       case 1:
         abrirMano();
         break;
-        
       case 2:
         cerrarMano();
         break;
-        
       case 3:
-        hacerGestoOK();
+        hacerGestoPersonalizado(160, 160, 90, 90); // Gesto OK
         break;
-        
       case 4:
         flexionarDedos();
         break;
-        
       case 5:
-        hacerGestosAleatorios();
+        moverBrazo(random(60, 120));  // Mueve brazo y muñeca coordinadamente
         break;
     }
-    
-    // Establecer un nuevo intervalo aleatorio para el siguiente movimiento
-    intervalo = random(1000, 3000); // Cambiar el tiempo de espera entre acciones
+
+    intervalo = random(1000, 3000);
   }
 }
 
-// Función para abrir la mano lentamente
+// Sincroniza movimiento del brazo y la muñeca
+void moverBrazo(int nuevoAnguloBrazo) {
+  Serial.print("Moviendo brazo a ");
+  Serial.print(nuevoAnguloBrazo);
+  Serial.println("°");
+
+  int anguloActual = brazoPos;
+  int paso = (nuevoAnguloBrazo > anguloActual) ? 1 : -1;
+
+  for (int i = anguloActual; i != nuevoAnguloBrazo; i += paso) {
+    brazo.write(i);
+
+    // Sincronización: la muñeca acompaña, invertida o compensada
+    int anguloMuneca = constrain(map(i, 45, 135, 135, 45), 45, 135);
+    muneca.write(anguloMuneca);
+
+    delay(15);
+  }
+
+  brazoPos = nuevoAnguloBrazo;
+  delay(getRandomDelay());
+}
+
 void abrirMano() {
   Serial.println("Abriendo la mano...");
-  for (int i = pulgarPos; i <= 180; i++) {
+  for (int i = 45; i <= 135; i++) {
     pulgar.write(i);
     indice.write(i);
     medio.write(i);
     anularMenique.write(i);
-    delay(random(10, 30)); // Retardo aleatorio entre cada incremento
+    delay(random(10, 20));
   }
-  delay(getRandomDelay()); // Esperar un tiempo aleatorio antes de continuar
+  delay(getRandomDelay());
 }
 
-// Función para cerrar la mano lentamente
 void cerrarMano() {
   Serial.println("Cerrando la mano...");
-  for (int i = pulgarPos; i >= 45; i--) {
+  for (int i = 135; i >= 45; i--) {
     pulgar.write(i);
     indice.write(i);
     medio.write(i);
     anularMenique.write(i);
-    delay(random(10, 30)); // Retardo aleatorio entre cada incremento
+    delay(random(10, 20));
   }
-  delay(getRandomDelay()); // Esperar un tiempo aleatorio antes de continuar
-}
-
-// Función para hacer un gesto de "OK"
-void hacerGestoOK() {
-  Serial.println("Haciendo gesto OK...");
-  pulgar.write(160);
-  indice.write(160);
-  medio.write(90);
-  anularMenique.write(90);
   delay(getRandomDelay());
-  
-  abrirMano(); // Volver a abrir la mano
 }
 
-// Función para simular la flexión de los dedos
 void flexionarDedos() {
   Serial.println("Flexionando los dedos...");
-  
-  // Flexionar el pulgar
-  pulgar.write(getRandomAngle());
-  delay(random(500, 1000));
-  
-  // Flexionar el índice
-  indice.write(getRandomAngle());
-  delay(random(500, 1000));
-  
-  // Flexionar el medio
-  medio.write(getRandomAngle());
-  delay(random(500, 1000));
-  
-  // Flexionar el anular + meñique
-  anularMenique.write(getRandomAngle());
-  delay(random(500, 1000));
-  
-  // Volver a abrir la mano después de flexionar
+  pulgar.write(getRandomAngle()); delay(random(500, 1000));
+  indice.write(getRandomAngle()); delay(random(500, 1000));
+  medio.write(getRandomAngle()); delay(random(500, 1000));
+  anularMenique.write(getRandomAngle()); delay(random(500, 1000));
   abrirMano();
 }
 
-// Función para hacer un gesto aleatorio con la mano
-void hacerGestosAleatorios() {
-  Serial.println("Haciendo gesto aleatorio...");
-  
-  // Gesto aleatorio para cada dedo
-  pulgar.write(getRandomAngle());
-  indice.write(getRandomAngle());
-  medio.write(getRandomAngle());
-  anularMenique.write(getRandomAngle());
-  
-  delay(getRandomDelay());  // Esperar un tiempo aleatorio
+void hacerGestoPersonalizado(int angPulgar, int angIndice, int angMedio, int angAnularMenique) {
+  Serial.println("Haciendo gesto personalizado...");
+  pulgar.write(angPulgar);
+  indice.write(angIndice);
+  medio.write(angMedio);
+  anularMenique.write(angAnularMenique);
+  delay(getRandomDelay());
 }
