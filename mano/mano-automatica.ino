@@ -108,6 +108,8 @@ unsigned long proximoCambioPose = 0;
 uint8_t indicePoseAnterior = 0;
 
 void setup() {
+  Serial.begin(9600);
+
   servoPulgarFlexion.attach(PIN_PULGAR_FLEXION);
   servoIndice.attach(PIN_INDICE);
   servoCorazon.attach(PIN_CORAZON);
@@ -118,8 +120,10 @@ void setup() {
 
   randomSeed(analogRead(A0));
 
+  Serial.println(F("=== Mano automatica iniciada ==="));
   aplicarPoseInstantanea(POSES[0]);
   poseActual = POSES[0];
+  imprimirPose(POSES[0]);
 
   proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
 }
@@ -127,12 +131,31 @@ void setup() {
 void loop() {
   if (millis() >= proximoCambioPose) {
     uint8_t indiceNuevaPose = elegirPoseDistinta(indicePoseAnterior);
+    Serial.print(F("Nueva pose seleccionada -> "));
+    Serial.println(POSES[indiceNuevaPose].nombre);
+
     moverAPoseSuave(POSES[indiceNuevaPose]);
     poseActual = POSES[indiceNuevaPose];
     indicePoseAnterior = indiceNuevaPose;
 
+    imprimirPose(POSES[indiceNuevaPose]);
+
     proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
   }
+}
+
+// Imprime por el Monitor Serie el nombre de la pose y el angulo aplicado a cada servo
+void imprimirPose(const PoseMano &pose) {
+  Serial.print(F("Pose aplicada: "));
+  Serial.println(pose.nombre);
+  Serial.print(F("  Pulgar flexion: ")); Serial.println(pose.pulgarFlexion);
+  Serial.print(F("  Indice: ")); Serial.println(pose.indice);
+  Serial.print(F("  Corazon: ")); Serial.println(pose.corazon);
+  Serial.print(F("  Anular+Menique: ")); Serial.println(pose.anularMenique);
+  Serial.print(F("  Pulgar vertical: ")); Serial.println(pose.pulgarVertical);
+  Serial.print(F("  Muneca: ")); Serial.println(pose.muneca);
+  Serial.print(F("  Codo: ")); Serial.println(pose.codo);
+  Serial.println(F("----------------------------------"));
 }
 
 // Elige un índice de pose aleatorio distinto al anterior, para no repetir la misma dos veces seguidas
