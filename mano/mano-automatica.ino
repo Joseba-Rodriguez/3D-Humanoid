@@ -11,15 +11,19 @@
   3     -> 32            -> Corazón
   4     -> 33            -> Anular + meñique (juntos, un solo servo mueve ambos dedos)
   5     -> 34            -> Pulgar, eje vertical / oposición (debe ir sincronizado con el motor 1)
+  6     -> 35            -> Muñeca, giro izquierda/derecha
+  16    -> 45            -> Codo, movimiento arriba/abajo
 
   CONVENCIÓN DE ÁNGULOS (0-180°, igual que en flex-mano/mano-felx.ino):
   - Dedos (índice, corazón, anular+meñique): 0° = dedo cerrado/flexionado, 180° = dedo abierto/recto.
   - Pulgar flexión (motor 1): 0° = pulgar flexionado hacia la palma, 180° = pulgar recto/extendido.
   - Pulgar vertical/oposición (motor 5): 0° = pulgar plano, pegado al plano de la mano,
     180° = pulgar levantado en posición vertical (separado, como en un "OK" o un "like").
+  - Muñeca (motor 6): 0° = girada del todo a la izquierda, 180° = girada del todo a la derecha.
+  - Codo (motor 16): 0° = codo totalmente abajo (brazo extendido), 180° = codo totalmente arriba (flexionado).
 
   IMPORTANTE: Estos ángulos son de partida. Ajusta las poses en POSES[] según lo que
-  veas físicamente en tu mano una vez montada (evita forzar los servos contra el tope mecánico).
+  veas físicamente en tu mano/brazo una vez montada (evita forzar los servos contra el tope mecánico).
 
   No modifica ni depende de la carpeta flex-mano (esa mano se controla por sensores flex).
 */
@@ -32,8 +36,10 @@ const uint8_t PIN_INDICE         = 31;
 const uint8_t PIN_CORAZON        = 32;
 const uint8_t PIN_ANULAR_MENIQUE = 33;
 const uint8_t PIN_PULGAR_VERTICAL = 34;
+const uint8_t PIN_MUNECA          = 35;
+const uint8_t PIN_CODO            = 45;
 
-const uint8_t NUM_SERVOS = 5;
+const uint8_t NUM_SERVOS = 7;
 
 // ---------- Objetos Servo ----------
 Servo servoPulgarFlexion;
@@ -41,6 +47,8 @@ Servo servoIndice;
 Servo servoCorazon;
 Servo servoAnularMenique;
 Servo servoPulgarVertical;
+Servo servoMuneca;
+Servo servoCodo;
 
 // ---------- Ángulos de referencia ----------
 const int DEDO_CERRADO = 0;
@@ -55,6 +63,14 @@ const int PULGAR_VERT_PLANO   = 0;
 const int PULGAR_VERT_ARRIBA  = 180;
 const int PULGAR_VERT_MEDIO   = 90;
 
+const int MUNECA_IZQUIERDA = 0;
+const int MUNECA_CENTRO    = 90;
+const int MUNECA_DERECHA   = 180;
+
+const int CODO_ABAJO = 0;
+const int CODO_MEDIO = 90;
+const int CODO_ARRIBA = 180;
+
 // ---------- Definición de una pose de mano ----------
 struct PoseMano {
   const char* nombre;
@@ -63,18 +79,20 @@ struct PoseMano {
   int corazon;
   int anularMenique;
   int pulgarVertical;
+  int muneca;
+  int codo;
 };
 
-// Cada pose define el ángulo de los 5 servos. Añade o ajusta poses libremente.
+// Cada pose define el ángulo de los 7 servos (dedos + muñeca + codo). Añade o ajusta poses libremente.
 const PoseMano POSES[] = {
-  { "Mano relajada",     PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO   },
-  { "Puno cerrado",      PULGAR_FLEX_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO   },
-  { "Mano abierta",      PULGAR_FLEX_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_ARRIBA  },
-  { "Senal de paz",      PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_CERRADO,  PULGAR_VERT_PLANO   },
-  { "Pulgar arriba",     PULGAR_FLEX_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_ARRIBA  },
-  { "Senalar",           PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO   },
-  { "OK",                PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_MEDIO   },
-  { "Garra",             PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO   },
+  { "Mano relajada",     PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO,  MUNECA_CENTRO,    CODO_MEDIO   },
+  { "Puno cerrado",      PULGAR_FLEX_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_CENTRO,    CODO_ARRIBA  },
+  { "Mano abierta",      PULGAR_FLEX_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_ARRIBA, MUNECA_CENTRO,    CODO_ABAJO   },
+  { "Senal de paz",      PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_DERECHA,   CODO_MEDIO   },
+  { "Pulgar arriba",     PULGAR_FLEX_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_ARRIBA, MUNECA_CENTRO,    CODO_ARRIBA  },
+  { "Senalar",           PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_IZQUIERDA, CODO_ABAJO   },
+  { "OK",                PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_MEDIO,  MUNECA_CENTRO,    CODO_MEDIO   },
+  { "Garra",             PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO,  MUNECA_DERECHA,   CODO_ARRIBA  },
 };
 const uint8_t NUM_POSES = sizeof(POSES) / sizeof(POSES[0]);
 
@@ -95,6 +113,8 @@ void setup() {
   servoCorazon.attach(PIN_CORAZON);
   servoAnularMenique.attach(PIN_ANULAR_MENIQUE);
   servoPulgarVertical.attach(PIN_PULGAR_VERTICAL);
+  servoMuneca.attach(PIN_MUNECA);
+  servoCodo.attach(PIN_CODO);
 
   randomSeed(analogRead(A0));
 
@@ -131,10 +151,12 @@ void aplicarPoseInstantanea(const PoseMano &pose) {
   servoCorazon.write(pose.corazon);
   servoAnularMenique.write(pose.anularMenique);
   servoPulgarVertical.write(pose.pulgarVertical);
+  servoMuneca.write(pose.muneca);
+  servoCodo.write(pose.codo);
 }
 
-// Interpola los 5 servos desde la pose actual hasta la pose destino, moviéndolos
-// todos a la vez (el pulgar recto y el pulgar vertical quedan sincronizados entre sí)
+// Interpola los 7 servos desde la pose actual hasta la pose destino, moviéndolos
+// todos a la vez (pulgar, muñeca y codo quedan sincronizados con el resto de dedos)
 void moverAPoseSuave(const PoseMano &destino) {
   PoseMano origen = poseActual;
 
@@ -144,6 +166,8 @@ void moverAPoseSuave(const PoseMano &destino) {
     servoCorazon.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.corazon, destino.corazon));
     servoAnularMenique.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.anularMenique, destino.anularMenique));
     servoPulgarVertical.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.pulgarVertical, destino.pulgarVertical));
+    servoMuneca.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.muneca, destino.muneca));
+    servoCodo.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.codo, destino.codo));
     delay(RETARDO_PASO_MS);
   }
 }
