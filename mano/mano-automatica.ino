@@ -26,6 +26,11 @@
   veas físicamente en tu mano/brazo una vez montada (evita forzar los servos contra el tope mecánico).
 
   No modifica ni depende de la carpeta flex-mano (esa mano se controla por sensores flex).
+
+  MODOS DE FUNCIONAMIENTO (Monitor Serie a 9600 baudios):
+  Escribe un número y pulsa Enter para cambiar de modo en cualquier momento:
+    0 -> Modo por defecto: poses aleatorias (comportamiento original).
+    1 -> Modo "Piedra, papel o tijera": la mano juega sola una jugada aleatoria cada cierto tiempo.
 */
 
 #include <Servo.h>
@@ -96,16 +101,33 @@ const PoseMano POSES[] = {
 };
 const uint8_t NUM_POSES = sizeof(POSES) / sizeof(POSES[0]);
 
+// Poses del juego "Piedra, papel o tijera" (mismo formato que POSES[])
+const PoseMano JUGADAS_RPS[] = {
+  { "Piedra",  PULGAR_FLEX_CERRADO, DEDO_CERRADO, DEDO_CERRADO, DEDO_CERRADO, PULGAR_VERT_PLANO,  MUNECA_CENTRO, CODO_ARRIBA },
+  { "Papel",   PULGAR_FLEX_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, PULGAR_VERT_ARRIBA, MUNECA_CENTRO, CODO_MEDIO  },
+  { "Tijera",  PULGAR_FLEX_CERRADO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_CERRADO, PULGAR_VERT_PLANO,  MUNECA_CENTRO, CODO_MEDIO  },
+};
+const uint8_t NUM_JUGADAS_RPS = sizeof(JUGADAS_RPS) / sizeof(JUGADAS_RPS[0]);
+
+// ---------- Modos de funcionamiento ----------
+const uint8_t MODO_POSES_ALEATORIAS = 0; // modo por defecto
+const uint8_t MODO_PIEDRA_PAPEL_TIJERA = 1;
+uint8_t modoActual = MODO_POSES_ALEATORIAS;
+
 // ---------- Temporización ----------
 const uint16_t TIEMPO_MIN_ENTRE_POSES_MS = 3000;
 const uint16_t TIEMPO_MAX_ENTRE_POSES_MS = 7000;
+const uint16_t TIEMPO_MIN_ENTRE_JUGADAS_MS = 4000;
+const uint16_t TIEMPO_MAX_ENTRE_JUGADAS_MS = 8000;
 const uint8_t  PASOS_MOVIMIENTO_SUAVE = 30; // nº de pasos para interpolar entre poses
 const uint8_t  RETARDO_PASO_MS = 20;        // retardo entre pasos de interpolación
 
 // ---------- Estado ----------
 PoseMano poseActual = POSES[0];
 unsigned long proximoCambioPose = 0;
+unsigned long proximaJugadaRPS = 0;
 uint8_t indicePoseAnterior = 0;
+uint8_t indiceJugadaAnterior = 0;
 
 void setup() {
   Serial.begin(9600);
@@ -121,14 +143,59 @@ void setup() {
   randomSeed(analogRead(A0));
 
   Serial.println(F("=== Mano automatica iniciada ==="));
+  mostrarMenuModos();
+
   aplicarPoseInstantanea(POSES[0]);
   poseActual = POSES[0];
   imprimirPose(POSES[0]);
 
   proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
+  proximaJugadaRPS = millis() + random(TIEMPO_MIN_ENTRE_JUGADAS_MS, TIEMPO_MAX_ENTRE_JUGADAS_MS);
 }
 
 void loop() {
+  leerCambioDeModo();
+
+  if (modoActual == MODO_PIEDRA_PAPEL_TIJERA) {
+    loopPiedraPapelTijera();
+  } else {
+    loopPosesAleatorias();
+  }
+}
+
+// Muestra los modos disponibles por el Monitor Serie
+void mostrarMenuModos() {
+  Serial.println(F("Escribe un numero y pulsa Enter para cambiar de modo:"));
+  Serial.println(F("  0 -> Poses aleatorias (por defecto)"));
+  Serial.println(F("  1 -> Piedra, papel o tijera"));
+}
+
+// Comprueba si ha llegado un numero por el Monitor Serie y cambia de modo si es valido
+void leerCambioDeModo() {
+  if (Serial.available() == 0) {
+    return;
+  }
+
+  int valor = Serial.parseInt();
+  while (Serial.available() > 0) {
+    Serial.read(); // descarta el resto de la linea (salto de linea, etc.)
+  }
+
+  if (valor != MODO_POSES_ALEATORIAS && valor != MODO_PIEDRA_PAPEL_TIJERA) {
+    Serial.println(F("Modo invalido. Usa 0 (poses aleatorias) o 1 (piedra, papel o tijera)."));
+    return;
+  }
+
+  modoActual = valor;
+  Serial.print(F("Modo cambiado a: "));
+  Serial.println(modoActual == MODO_PIEDRA_PAPEL_TIJERA ? F("Piedra, papel o tijera") : F("Poses aleatorias"));
+
+  proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
+  proximaJugadaRPS = millis() + random(TIEMPO_MIN_ENTRE_JUGADAS_MS, TIEMPO_MAX_ENTRE_JUGADAS_MS);
+}
+
+// Comportamiento del modo por defecto: poses aleatorias de la mano
+void loopPosesAleatorias() {
   if (millis() >= proximoCambioPose) {
     uint8_t indiceNuevaPose = elegirPoseDistinta(indicePoseAnterior);
     Serial.print(F("Nueva pose seleccionada -> "));
@@ -141,6 +208,27 @@ void loop() {
     imprimirPose(POSES[indiceNuevaPose]);
 
     proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
+  }
+}
+
+// Comportamiento del modo "Piedra, papel o tijera": la mano juega sola una jugada aleatoria
+void loopPiedraPapelTijera() {
+  if (millis() >= proximaJugadaRPS) {
+    uint8_t indiceNuevaJugada;
+    do {
+      indiceNuevaJugada = random(0, NUM_JUGADAS_RPS);
+    } while (indiceNuevaJugada == indiceJugadaAnterior && NUM_JUGADAS_RPS > 1);
+
+    Serial.print(F("Jugando... -> "));
+    Serial.println(JUGADAS_RPS[indiceNuevaJugada].nombre);
+
+    moverAPoseSuave(JUGADAS_RPS[indiceNuevaJugada]);
+    poseActual = JUGADAS_RPS[indiceNuevaJugada];
+    indiceJugadaAnterior = indiceNuevaJugada;
+
+    imprimirPose(JUGADAS_RPS[indiceNuevaJugada]);
+
+    proximaJugadaRPS = millis() + random(TIEMPO_MIN_ENTRE_JUGADAS_MS, TIEMPO_MAX_ENTRE_JUGADAS_MS);
   }
 }
 
