@@ -158,10 +158,20 @@ const uint16_t RPS_MIN_MS = 4000, RPS_MAX_MS = 8000;
 const uint8_t  MANO_TOTAL_PASOS = 30;
 const uint8_t  MANO_RETARDO_PASO_MS = 20;
 
+// Sacudida del brazo (arriba/abajo) antes de revelar la jugada de piedra, papel o tijera
+const uint8_t  SACUDIDAS_CODO = 3;       // nº de veces que sube y baja el brazo
+const uint8_t  SACUDIDA_PASOS = 10;      // pasos de interpolacion de cada subida/bajada
+const uint8_t  SACUDIDA_RETARDO_MS = 18; // retardo entre pasos de la sacudida
+
 PoseMano manoPoseActual = POSES_MANO[0], manoOrigen, manoDestino;
 bool manoEnMovimiento = false;
 unsigned long manoProximoEvento = 0, manoUltimoPasoMillis = 0;
 uint8_t manoPasoActual = 0, manoIndiceAnterior = 0;
+
+bool manoSacudiendo = false;
+int manoSacudidaOrigen = 0, manoSacudidaDestino = 0;
+uint8_t manoSacudidaPasoActual = 0, manoSacudidaContador = 0, manoIdxJugadaPendiente = 0;
+unsigned long manoUltimoPasoSacudidaMillis = 0;
 
 // ================================================================
 // CUELLO - constantes y estado (movimiento lento y pequeño)
@@ -399,6 +409,11 @@ void leerCambioModoMano() {
 void actualizarMano() {
   unsigned long ahora = millis();
 
+  if (manoSacudiendo) {
+    actualizarSacudidaBrazo();
+    return;
+  }
+
   if (!manoEnMovimiento) {
     if (ahora >= manoProximoEvento) {
       if (modoMano == MODO_PIEDRA_PAPEL_TIJERA) {
@@ -407,10 +422,14 @@ void actualizarMano() {
           idx = random(0, NUM_JUGADAS_RPS);
         } while (idx == manoIndiceAnterior && NUM_JUGADAS_RPS > 1);
 
-        Serial.print(F("Mano jugando... -> "));
-        Serial.println(JUGADAS_RPS[idx].nombre);
-        iniciarMovimientoMano(JUGADAS_RPS[idx]);
-        manoIndiceAnterior = idx;
+        Serial.println(F("Mano preparando jugada..."));
+        manoIdxJugadaPendiente = idx;
+        manoSacudiendo = true;
+        manoSacudidaContador = 0;
+        manoSacudidaPasoActual = 0;
+        manoSacudidaOrigen = manoPoseActual.codo;
+        manoSacudidaDestino = CODO_ARRIBA;
+        manoUltimoPasoSacudidaMillis = ahora;
       } else {
         uint8_t idx;
         do {
@@ -447,6 +466,41 @@ void actualizarMano() {
         ? random(RPS_MIN_MS, RPS_MAX_MS)
         : random(POSE_MANO_MIN_MS, POSE_MANO_MAX_MS);
       manoProximoEvento = ahora + espera;
+    }
+  }
+}
+
+// Sube y baja el codo (brazo) varias veces, sin bloquear el resto del humanoide, antes
+// de revelar la jugada de piedra, papel o tijera (como al contar "...ya!")
+void actualizarSacudidaBrazo() {
+  unsigned long ahora = millis();
+  if (ahora - manoUltimoPasoSacudidaMillis < SACUDIDA_RETARDO_MS) {
+    return;
+  }
+  manoUltimoPasoSacudidaMillis = ahora;
+  manoSacudidaPasoActual++;
+
+  servoCodo.write(map(manoSacudidaPasoActual, 0, SACUDIDA_PASOS, manoSacudidaOrigen, manoSacudidaDestino));
+
+  if (manoSacudidaPasoActual >= SACUDIDA_PASOS) {
+    manoPoseActual.codo = manoSacudidaDestino;
+    manoSacudidaPasoActual = 0;
+
+    if (manoSacudidaDestino == CODO_ARRIBA) {
+      manoSacudidaOrigen = CODO_ARRIBA;
+      manoSacudidaDestino = CODO_MEDIO;
+    } else {
+      manoSacudidaContador++;
+      if (manoSacudidaContador >= SACUDIDAS_CODO) {
+        manoSacudiendo = false;
+        Serial.print(F("Mano jugando... -> "));
+        Serial.println(JUGADAS_RPS[manoIdxJugadaPendiente].nombre);
+        iniciarMovimientoMano(JUGADAS_RPS[manoIdxJugadaPendiente]);
+        manoIndiceAnterior = manoIdxJugadaPendiente;
+      } else {
+        manoSacudidaOrigen = CODO_MEDIO;
+        manoSacudidaDestino = CODO_ARRIBA;
+      }
     }
   }
 }
