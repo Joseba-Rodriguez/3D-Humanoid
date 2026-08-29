@@ -19,11 +19,20 @@
   - Pulgar flexión (motor 1): 0° = pulgar flexionado hacia la palma, 180° = pulgar recto/extendido.
   - Pulgar vertical/oposición (motor 5): 0° = pulgar plano, pegado al plano de la mano,
     180° = pulgar levantado en posición vertical (separado, como en un "OK" o un "like").
-  - Muñeca (motor 6): 0° = girada del todo a la izquierda, 180° = girada del todo a la derecha.
+  - Muñeca (motor 6): a nivel LÓGICO, 0° = "izquierda" y 180° = "derecha" (igual que antes,
+    para que las poses no cambien de significado). A nivel FÍSICO el servo ahora gira al
+    sentido contrario: el ángulo se invierte justo antes de escribirlo (ver escribirMuneca()).
   - Codo (motor 16): 0° = codo totalmente abajo (brazo extendido), 180° = codo totalmente arriba (flexionado).
 
   IMPORTANTE: Estos ángulos son de partida. Ajusta las poses en POSES[] según lo que
   veas físicamente en tu mano/brazo una vez montada (evita forzar los servos contra el tope mecánico).
+
+  SEGURIDAD DE LOS SERVOS: todos los servos se escriben ahora a través de
+  escribirServoSeguro(), que limita (constrain) el ángulo a un rango seguro por servo,
+  para que ninguno llegue a forzarse contra su tope mecánico. El motor 5 (pulgar vertical),
+  que era el que se estaba forzando y arriesgaba romperse, tiene un rango más estrecho
+  todavía (ver LIM_MIN_PULGAR_VERTICAL / LIM_MAX_PULGAR_VERTICAL). Ajusta estos límites
+  según lo que veas físicamente en tu mano.
 
   No modifica ni depende de la carpeta flex-mano (esa mano se controla por sensores flex).
 
@@ -63,10 +72,12 @@ const int DEDO_MEDIO   = 90;
 const int PULGAR_FLEX_CERRADO = 0;
 const int PULGAR_FLEX_ABIERTO = 180;
 const int PULGAR_FLEX_MEDIO   = 90;
+const int PULGAR_FLEX_OK      = 25; // más cerrado que MEDIO, para pellizcar con el índice en la pose "OK"
 
 const int PULGAR_VERT_PLANO   = 0;
 const int PULGAR_VERT_ARRIBA  = 180;
 const int PULGAR_VERT_MEDIO   = 90;
+const int PULGAR_VERT_OK      = 25; // más cerrado/plano que MEDIO, para la pose "OK"
 
 const int MUNECA_IZQUIERDA = 0;
 const int MUNECA_CENTRO    = 90;
@@ -75,6 +86,35 @@ const int MUNECA_DERECHA   = 180;
 const int CODO_ABAJO = 0;
 const int CODO_MEDIO = 90;
 const int CODO_ARRIBA = 180;
+
+// ---------- Límites de seguridad de los servos ----------
+// Cada servo se limita (constrain) a un rango algo más estrecho que 0-180 para que
+// nunca llegue a forzarse contra su tope mecánico. Ajusta estos valores según lo
+// que veas físicamente al mover cada motor en tu mano.
+const int LIM_MIN_PULGAR_FLEX = 5;
+const int LIM_MAX_PULGAR_FLEX = 175;
+
+const int LIM_MIN_INDICE = 5;
+const int LIM_MAX_INDICE = 175;
+
+const int LIM_MIN_CORAZON = 5;
+const int LIM_MAX_CORAZON = 175;
+
+const int LIM_MIN_ANULAR_MENIQUE = 5;
+const int LIM_MAX_ANULAR_MENIQUE = 175;
+
+// Motor 5 (pulgar vertical/oposición): este era el que se estaba forzando contra el
+// tope mecánico. Se le da un margen bastante más amplio (rango más estrecho) para
+// que nunca llegue a los extremos físicos 0°/180°. Si sigue apretando, estrecha aún
+// más este rango (por ejemplo 30-150).
+const int LIM_MIN_PULGAR_VERTICAL = 20;
+const int LIM_MAX_PULGAR_VERTICAL = 160;
+
+const int LIM_MIN_MUNECA = 5;
+const int LIM_MAX_MUNECA = 175;
+
+const int LIM_MIN_CODO = 5;
+const int LIM_MAX_CODO = 175;
 
 // ---------- Definición de una pose de mano ----------
 struct PoseMano {
@@ -96,7 +136,7 @@ const PoseMano POSES[] = {
   { "Senal de paz",      PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_DERECHA,   CODO_MEDIO   },
   { "Pulgar arriba",     PULGAR_FLEX_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_ARRIBA, MUNECA_CENTRO,    CODO_ARRIBA  },
   { "Senalar",           PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_IZQUIERDA, CODO_ABAJO   },
-  { "OK",                PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_MEDIO,  MUNECA_CENTRO,    CODO_MEDIO   },
+  { "OK",                PULGAR_FLEX_OK,       DEDO_MEDIO,    DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_OK,     MUNECA_CENTRO,    CODO_MEDIO   },
   { "Garra",             PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO,  MUNECA_DERECHA,   CODO_ARRIBA  },
 };
 const uint8_t NUM_POSES = sizeof(POSES) / sizeof(POSES[0]);
@@ -255,15 +295,30 @@ uint8_t elegirPoseDistinta(uint8_t indiceAnterior) {
   return indiceNuevo;
 }
 
+// Escribe un ángulo en un servo, pero primero lo limita (constrain) a un rango seguro,
+// para que el servo nunca se fuerce contra su tope mecánico.
+void escribirServoSeguro(Servo &servo, int angulo, int limMin, int limMax) {
+  int anguloSeguro = constrain(angulo, limMin, limMax);
+  servo.write(anguloSeguro);
+}
+
+// La muñeca ahora gira al sentido contrario al original: invertimos el ángulo lógico
+// (180 - angulo) justo antes de escribirlo en el servo físico. Así las poses (que usan
+// MUNECA_IZQUIERDA/CENTRO/DERECHA) no hay que tocarlas, solo se invierte el giro real.
+void escribirMuneca(int anguloLogico) {
+  int anguloFisico = 180 - anguloLogico;
+  escribirServoSeguro(servoMuneca, anguloFisico, LIM_MIN_MUNECA, LIM_MAX_MUNECA);
+}
+
 // Aplica una pose directamente, sin interpolación (uso solo en el arranque)
 void aplicarPoseInstantanea(const PoseMano &pose) {
-  servoPulgarFlexion.write(pose.pulgarFlexion);
-  servoIndice.write(pose.indice);
-  servoCorazon.write(pose.corazon);
-  servoAnularMenique.write(pose.anularMenique);
-  servoPulgarVertical.write(pose.pulgarVertical);
-  servoMuneca.write(pose.muneca);
-  servoCodo.write(pose.codo);
+  escribirServoSeguro(servoPulgarFlexion, pose.pulgarFlexion, LIM_MIN_PULGAR_FLEX, LIM_MAX_PULGAR_FLEX);
+  escribirServoSeguro(servoIndice, pose.indice, LIM_MIN_INDICE, LIM_MAX_INDICE);
+  escribirServoSeguro(servoCorazon, pose.corazon, LIM_MIN_CORAZON, LIM_MAX_CORAZON);
+  escribirServoSeguro(servoAnularMenique, pose.anularMenique, LIM_MIN_ANULAR_MENIQUE, LIM_MAX_ANULAR_MENIQUE);
+  escribirServoSeguro(servoPulgarVertical, pose.pulgarVertical, LIM_MIN_PULGAR_VERTICAL, LIM_MAX_PULGAR_VERTICAL);
+  escribirMuneca(pose.muneca);
+  escribirServoSeguro(servoCodo, pose.codo, LIM_MIN_CODO, LIM_MAX_CODO);
 }
 
 // Interpola los 7 servos desde la pose actual hasta la pose destino, moviéndolos
@@ -272,13 +327,13 @@ void moverAPoseSuave(const PoseMano &destino) {
   PoseMano origen = poseActual;
 
   for (uint8_t paso = 1; paso <= PASOS_MOVIMIENTO_SUAVE; paso++) {
-    servoPulgarFlexion.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.pulgarFlexion, destino.pulgarFlexion));
-    servoIndice.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.indice, destino.indice));
-    servoCorazon.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.corazon, destino.corazon));
-    servoAnularMenique.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.anularMenique, destino.anularMenique));
-    servoPulgarVertical.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.pulgarVertical, destino.pulgarVertical));
-    servoMuneca.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.muneca, destino.muneca));
-    servoCodo.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.codo, destino.codo));
+    escribirServoSeguro(servoPulgarFlexion, map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.pulgarFlexion, destino.pulgarFlexion), LIM_MIN_PULGAR_FLEX, LIM_MAX_PULGAR_FLEX);
+    escribirServoSeguro(servoIndice, map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.indice, destino.indice), LIM_MIN_INDICE, LIM_MAX_INDICE);
+    escribirServoSeguro(servoCorazon, map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.corazon, destino.corazon), LIM_MIN_CORAZON, LIM_MAX_CORAZON);
+    escribirServoSeguro(servoAnularMenique, map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.anularMenique, destino.anularMenique), LIM_MIN_ANULAR_MENIQUE, LIM_MAX_ANULAR_MENIQUE);
+    escribirServoSeguro(servoPulgarVertical, map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.pulgarVertical, destino.pulgarVertical), LIM_MIN_PULGAR_VERTICAL, LIM_MAX_PULGAR_VERTICAL);
+    escribirMuneca(map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.muneca, destino.muneca));
+    escribirServoSeguro(servoCodo, map(paso, 0, PASOS_MOVIMIENTO_SUAVE, origen.codo, destino.codo), LIM_MIN_CODO, LIM_MAX_CODO);
     delay(RETARDO_PASO_MS);
   }
 }
