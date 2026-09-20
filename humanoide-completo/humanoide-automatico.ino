@@ -1,16 +1,24 @@
 /*
-  humanoide-completo.ino
+  humanoide-completo.ino  (v2)
   Programa unificado del humanoide 3D - Arduino Mega 2560.
-  Une en un solo sketch los tres módulos que antes iban por separado:
-    - CUELLO  (3 servos: inclinación izq/der + rotación)
-    - OJOS    (6 servos: 4 párpados + movimiento vertical/horizontal)
-    - MANO    (7 servos: dedos + muñeca + codo)
+    - CUELLO  (3 servos)  -> mismos valores, poses y tiempos de siempre
+    - OJOS    (6 servos)  -> comportamiento natural, con ánimos
+    - MANO    (7 servos)  -> transiciones en cascada, gestos, pulgar protegido
 
-  Cada módulo conserva exactamente su misma lógica y sus mismos valores/ángulos
-  que tenía por separado. Lo único que cambia es que algunos nombres de
-  variables/funciones que se repetían entre módulos (POSES, moverAPoseSuave,
-  imprimirPose, etc.) se han renombrado añadiendo el sufijo Cuello/Ojos/Mano
-  para que puedan convivir en el mismo archivo sin chocar.
+  NOVEDADES DE ESTA VERSIÓN (sin hardware nuevo):
+   1. Nada bloquea: ya no hay delay(). Cuello, ojos y mano se mueven a la vez.
+   2. Coordinación: los ojos se adelantan al cuello y luego se recentran;
+      a veces los ojos miran a la mano cuando hace un gesto.
+   3. Ánimos: Tranquilo, Curioso, Somnoliento, Alerta, Tímido. Cambian solos
+      cada 1-3 minutos y modifican parpadeo, mirada y velocidad de la mano.
+   4. Dormir / despertar (por Serial, o automático si activas SUENO_AUTOMATICO).
+   5. Mano: los dedos se cierran/abren en cascada, con curvas suaves, y hay
+      gestos con significado (saludar, ven aquí, silencio, así así, tamborilear).
+   6. Aleatoriedad más natural (campana de Gauss y tiempos sesgados).
+
+  COMANDOS POR EL MONITOR SERIE (9600 baudios, un carácter y Enter):
+    0 Tranquilo   1 Curioso   2 Somnoliento   3 Alerta   4 Tímido
+    d dormir      a despertar    g gesto de mano ahora    ? ayuda
 
   Tabla de conexionado completa:
   Módulo  Motor -> Pin -> Función
@@ -27,21 +35,86 @@
   MANO    2     -> 31  -> Índice
   MANO    3     -> 32  -> Corazón
   MANO    4     -> 33  -> Anular + meñique
-  MANO    5     -> 34  -> Pulgar, eje vertical / oposición
-  MANO    6     -> 35  -> Muñeca, giro izquierda/derecha
+  MANO    5     -> 34  -> Pulgar, eje vertical / oposición (RECORRIDO MUY REDUCIDO)
+  MANO    6     -> 35  -> Muñeca, giro (solo hacia dentro)
   MANO    16    -> 45  -> Codo, movimiento arriba/abajo
-
-  MODOS DE FUNCIONAMIENTO DE LA MANO (Monitor Serie a 9600 baudios):
-  Escribe un número y pulsa Enter para cambiar de modo en cualquier momento:
-    0 -> Modo por defecto: poses aleatorias.
-    1 -> Modo "Piedra, papel o tijera".
-  (El cuello y los ojos se mueven siempre solos, en paralelo, sin necesidad de comandos).
 */
 
 #include <Servo.h>
 
 // ======================================================================
+// ======================== TIPOS Y UTILIDADES ==========================
+// ======================================================================
+
+// Mensajes detallados por Serial (los ángulos de cada pose). Desactivado por
+// defecto porque imprimir mucho a 9600 baudios frena el programa.
+const bool DEBUG_DETALLE = false;
+
+// Un "canal" mueve un valor de forma suave (curva en S) sin bloquear el programa.
+struct Canal {
+  float valor;             // valor actual
+  float desde;
+  float hasta;
+  unsigned long inicio;    // instante en que empieza (permite retrasos)
+  unsigned long dur;       // duración en ms
+  bool activo;
+};
+
+// Ánimos del robot
+enum Animo {
+  ANIMO_TRANQUILO = 0,
+  ANIMO_CURIOSO,
+  ANIMO_SOMNOLIENTO,
+  ANIMO_ALERTA,
+  ANIMO_TIMIDO,
+  NUM_ANIMOS
+};
+
+struct PerfilAnimo {
+  const char* nombre;
+  float   factorParpadeo;   // x tiempo entre parpadeos (mayor = parpadea menos)
+  float   factorFijacion;   // x tiempo que mantiene la mirada
+  float   factorVelOjos;    // x duración de los movimientos oculares (mayor = más lento)
+  uint8_t caidaParpado;     // % de cierre base de los párpados (0 = muy abiertos)
+  int8_t  sesgoVertical;    // grados: + mira algo hacia abajo, - hacia arriba
+  uint8_t probAmplia;       // % de miradas a un punto lejano
+  uint8_t probReojo;        // % de miradas de reojo
+  uint8_t probFija;         // % de miradas fijas y largas
+  uint8_t probLento;        // % de parpadeos lentos
+  float   factorPoses;      // x tiempo entre poses de la mano
+  float   factorVelMano;    // x duración de las poses de la mano
+  uint8_t probGesto;        // % de veces que en vez de una pose hace un gesto
+};
+
+const PerfilAnimo PERFILES[NUM_ANIMOS] = {
+  //  nombre         parp  fij   velO  caida sesgo amp reo fija lento poses velM gesto
+  { "Tranquilo",     1.0,  1.0,  1.0,   0,    0,   12,  8,  12,   8,   1.0,  1.0, 20 },
+  { "Curioso",       1.4,  1.3,  0.9,   0,   -3,   20,  8,  25,   5,   0.9,  1.0, 30 },
+  { "Somnoliento",   0.7,  1.5,  1.7,  25,    4,    5,  2,   8,  40,   1.6,  1.6,  8 },
+  { "Alerta",        1.6,  0.6,  0.7,   0,    0,   35,  5,   3,   0,   0.7,  0.8, 30 },
+  { "Timido",        0.9,  1.0,  1.2,   8,    6,    8, 20,   5,  10,   1.3,  1.3, 10 },
+};
+
+// Probabilidad (%) de cada ánimo al cambiar (suman 100)
+const uint8_t PESO_ANIMO[NUM_ANIMOS] = { 40, 20, 15, 15, 10 };
+
+// Si es true, en ánimo Somnoliento el robot a veces se duerme solo y despierta después.
+const bool SUENO_AUTOMATICO = false;
+
+// ---------- Estado global de ánimo y vida ----------
+uint8_t animoActual = ANIMO_TRANQUILO;
+const PerfilAnimo* perfil = &PERFILES[ANIMO_TRANQUILO];
+unsigned long proximoCambioAnimo = 0;
+
+bool durmiendo = false;
+uint8_t faseDespertar = 0;            // 0 = no está despertando
+unsigned long tFaseDespertar = 0;
+bool despertarAutomatico = false;
+unsigned long tDespertarAutomatico = 0;
+
+// ======================================================================
 // =========================== CUELLO ==================================
+// ============ (valores, poses y tiempos SIN CAMBIOS) ==================
 // ======================================================================
 
 // ---------- Pines (cuello) ----------
@@ -91,8 +164,21 @@ const uint16_t TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS = 7000;
 const uint16_t PASOS_MOVIMIENTO_SUAVE_CUELLO = 85;
 const uint8_t  RETARDO_PASO_MS_CUELLO = 40;
 
+// ---------- Coordinación con los ojos (nuevo; no cambia los valores del cuello) ----------
+const uint16_t ADELANTO_OJOS_MS = 150;          // los ojos miran hacia el giro antes de que empiece el cuello
+const uint16_t PASO_CUELLO_RECENTRAR_OJOS = 45; // a mitad de giro los ojos vuelven al centro
+
 // ---------- Estado (cuello) ----------
+enum EstadoCuello { CUELLO_ESPERA, CUELLO_PREPARANDO, CUELLO_MOVIENDO };
+
+EstadoCuello estadoCuello = CUELLO_ESPERA;
 PoseCuello poseActualCuello = POSES_CUELLO[0];
+PoseCuello origenCuello = POSES_CUELLO[0];
+const PoseCuello* destinoCuello = &POSES_CUELLO[0];
+uint8_t indiceDestinoCuello = 0;
+uint16_t pasoCuello = 0;
+unsigned long tInicioCuello = 0;
+unsigned long tProximoPasoCuello = 0;
 unsigned long proximoMovimientoCuello = 0;
 uint8_t indicePoseAnteriorCuello = 0;
 
@@ -116,7 +202,7 @@ Servo servoParpadoInfDer;
 Servo servoOjosVertical;
 Servo servoOjosHorizontal;
 
-// ---------- Ángulos de los párpados ----------
+// ---------- Ángulos de los párpados (LÍMITES: no se tocan) ----------
 const int PARPADO_SUP_IZQ_ABIERTO = 130;
 const int PARPADO_SUP_IZQ_CERRADO = 90;
 const int PARPADO_SUP_DER_ABIERTO = 50;
@@ -127,46 +213,88 @@ const int PARPADO_INF_IZQ_CERRADO = 90;
 const int PARPADO_INF_DER_ABIERTO = 130;
 const int PARPADO_INF_DER_CERRADO = 90;
 
-// ---------- Ángulos de movimiento ocular ----------
+// ---------- Ángulos de movimiento ocular (LÍMITES: no se tocan) ----------
 const int OJOS_VERTICAL_CENTRO   = 90;
 const int OJOS_VERTICAL_ARRIBA   = 70;
 const int OJOS_VERTICAL_ABAJO    = 110;
 
-const int OJOS_HORIZONTAL_CENTRO   = 90;
+const int OJOS_HORIZONTAL_CENTRO    = 90;
 const int OJOS_HORIZONTAL_IZQUIERDA = 70;
 const int OJOS_HORIZONTAL_DERECHA   = 100;
 
-// ---------- Temporización (ojos) ----------
-const uint16_t PARPADEO_MIN_MS = 2000;
-const uint16_t PARPADEO_MAX_MS = 6000;
-const uint16_t PARPADEO_DURACION_MS = 120;
-const uint8_t  PROBABILIDAD_DOBLE_PARPADEO = 20;
+// ---------- Temporización natural (ojos) ----------
+const uint16_t PARPADEO_MIN_MS = 4000;
+const uint16_t PARPADEO_MAX_MS = 10000;
+const uint8_t  PROB_PARPADEO_DOBLE = 12;         // % de parpadeos dobles
 
-const uint16_t MIRADA_MIN_MS = 1500;
+const unsigned long GUINO_MIN_MS = 60000UL;      // un guiño cada 1-2,5 min aprox.
+const unsigned long GUINO_MAX_MS = 150000UL;
+
+const uint16_t MIRADA_MIN_MS = 1200;
 const uint16_t MIRADA_MAX_MS = 4500;
-const uint8_t  PASOS_MOVIMIENTO_SUAVE_OJOS = 20;
-const uint8_t  RETARDO_PASO_MS_OJOS = 15;
+const uint16_t MIRADA_FIJA_MIN_MS = 6000;
+const uint16_t MIRADA_FIJA_MAX_MS = 11000;
+const uint8_t  PROB_PARPADEO_CON_MIRADA = 45;    // % de cambios grandes de mirada con parpadeo
+
+const uint8_t  MICRO_AMPLITUD = 2;               // micro-movimientos en grados (0 = desactivado)
+const uint8_t  PARPADO_BAJADA_MIRADA_PCT = 20;   // el párpado baja algo al mirar hacia abajo
+
+// Hacia dónde miran los ojos cuando la mano hace un gesto.
+// Si la mano está en el otro lado, cambia OJOS_HORIZONTAL_DERECHA por OJOS_HORIZONTAL_IZQUIERDA.
+const int MIRAR_MANO_HORIZONTAL = OJOS_HORIZONTAL_DERECHA;
+const int MIRAR_MANO_VERTICAL   = OJOS_VERTICAL_ABAJO - 8;
 
 // ---------- Estado (ojos) ----------
+Canal cVert;        // grados
+Canal cHoriz;       // grados
+Canal cParpIzq;     // % de cierre: 0 abierto ... 100 cerrado
+Canal cParpDer;
+
+int ultVertical = -1, ultHorizontal = -1;
+int ultSupIzq = -1, ultSupDer = -1, ultInfIzq = -1, ultInfDer = -1;
+
+int objetivoV = OJOS_VERTICAL_CENTRO;      // punto que se está fijando
+int objetivoH = OJOS_HORIZONTAL_CENTRO;
+float parpBase = 0;                         // cierre "en reposo" de los párpados
+
 unsigned long proximoParpadeo = 0;
+unsigned long proximoGuino = 0;
 unsigned long proximaMirada = 0;
-int verticalActual = OJOS_VERTICAL_CENTRO;
-int horizontalActual = OJOS_HORIZONTAL_CENTRO;
+unsigned long proximoMicro = 0;
+
+bool miradaFija = false;
+bool reojoPendiente = false;
+int reojoRetornoV = OJOS_VERTICAL_CENTRO;
+int reojoRetornoH = OJOS_HORIZONTAL_CENTRO;
+
+// Gesto de párpados (parpadeo normal/lento/doble o guiño)
+uint8_t faseParp = 0;            // 0 libre, 1 cerrando, 2 cerrado, 3 abriendo, 4 pausa entre parpadeos
+bool gestoIzq = false;
+bool gestoDer = false;
+unsigned long durCierreParp = 0;
+unsigned long mantenerParp = 0;
+unsigned long durAperturaParp = 0;
+unsigned long pausaParp = 0;
+uint8_t repeticionesParp = 0;
+unsigned long finFaseParp = 0;
 
 // ======================================================================
 // ============================ MANO ====================================
 // ======================================================================
 
 // ---------- Pines (mano) ----------
-const uint8_t PIN_PULGAR_FLEXION = 30;
-const uint8_t PIN_INDICE         = 31;
-const uint8_t PIN_CORAZON        = 32;
-const uint8_t PIN_ANULAR_MENIQUE = 33;
-//const uint8_t PIN_PULGAR_VERTICAL = 34;
+const uint8_t PIN_PULGAR_FLEXION  = 30;
+const uint8_t PIN_INDICE          = 31;
+const uint8_t PIN_CORAZON         = 32;
+const uint8_t PIN_ANULAR_MENIQUE  = 33;
+const uint8_t PIN_PULGAR_VERTICAL = 34;   // con recorrido MUY reducido
 const uint8_t PIN_MUNECA          = 35;
 const uint8_t PIN_CODO            = 45;
 
 const uint8_t NUM_SERVOS = 7;
+
+// Índices de los canales de la mano
+enum { M_PULGAR_FLEX = 0, M_INDICE, M_CORAZON, M_ANULAR, M_PULGAR_VERT, M_MUNECA, M_CODO };
 
 // ---------- Objetos Servo (mano) ----------
 Servo servoPulgarFlexion;
@@ -181,20 +309,27 @@ Servo servoCodo;
 const int DEDO_CERRADO = 0;
 const int DEDO_ABIERTO = 180;
 const int DEDO_MEDIO   = 90;
+const int DEDO_TAP     = 45;     // "golpecito" al tamborilear
 
 const int PULGAR_FLEX_CERRADO = 0;
 const int PULGAR_FLEX_ABIERTO = 180;
 const int PULGAR_FLEX_MEDIO   = 90;
 const int PULGAR_FLEX_OK      = 25;
 
-const int PULGAR_VERT_PLANO   = 0;
-const int PULGAR_VERT_ARRIBA  = 180;
+// Pulgar vertical (motor 5): recorrido MUY pequeño (80-100).
+// Si al probarlo va al revés de lo esperado, intercambia PLANO y ARRIBA.
+const int PULGAR_VERT_PLANO   = 80;
 const int PULGAR_VERT_MEDIO   = 90;
-const int PULGAR_VERT_OK      = 25;
+const int PULGAR_VERT_ARRIBA  = 100;
+const int PULGAR_VERT_OK      = 85;
 
-const int MUNECA_IZQUIERDA = 0;
-const int MUNECA_CENTRO    = 90;
-const int MUNECA_DERECHA   = 180;
+// Muñeca: ÁNGULO REAL del servo. 90 = recta. Solo hacia DENTRO (90 -> 175).
+const int MUNECA_RECTA        = 90;
+const int MUNECA_DENTRO_POCO  = 110;
+const int MUNECA_DENTRO_MEDIO = 135;
+const int MUNECA_DENTRO_MAX   = 175;
+const int MUNECA_SALUDO_A     = 105;     // extremos del "adiós" con la mano
+const int MUNECA_SALUDO_B     = 150;
 
 const int CODO_ABAJO = 0;
 const int CODO_MEDIO = 90;
@@ -213,10 +348,10 @@ const int LIM_MAX_CORAZON = 175;
 const int LIM_MIN_ANULAR_MENIQUE = 5;
 const int LIM_MAX_ANULAR_MENIQUE = 175;
 
-const int LIM_MIN_PULGAR_VERTICAL = 20;
-const int LIM_MAX_PULGAR_VERTICAL = 160;
+const int LIM_MIN_PULGAR_VERTICAL = 75;
+const int LIM_MAX_PULGAR_VERTICAL = 105;
 
-const int LIM_MIN_MUNECA = 5;
+const int LIM_MIN_MUNECA = 90;           // nunca hacia fuera
 const int LIM_MAX_MUNECA = 175;
 
 const int LIM_MIN_CODO = 5;
@@ -230,49 +365,131 @@ struct PoseMano {
   int corazon;
   int anularMenique;
   int pulgarVertical;
-  int muneca;
+  int muneca;        // ángulo real del servo (90 recta ... 175 máximo hacia dentro)
   int codo;
 };
 
 const PoseMano POSES_MANO[] = {
-  { "Mano relajada",     PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO,  MUNECA_CENTRO,    CODO_MEDIO   },
-  { "Puno cerrado",      PULGAR_FLEX_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_CENTRO,    CODO_ARRIBA  },
-  { "Mano abierta",      PULGAR_FLEX_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_ARRIBA, MUNECA_CENTRO,    CODO_ABAJO   },
-  { "Senal de paz",      PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_DERECHA,   CODO_MEDIO   },
-  { "Pulgar arriba",     PULGAR_FLEX_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_ARRIBA, MUNECA_CENTRO,    CODO_ARRIBA  },
-  { "Senalar",           PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_IZQUIERDA, CODO_ABAJO   },
-  { "OK",                PULGAR_FLEX_OK,       DEDO_MEDIO,    DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_OK,     MUNECA_CENTRO,    CODO_MEDIO   },
-  { "Garra",             PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO,  MUNECA_DERECHA,   CODO_ARRIBA  },
+  { "Mano relajada",     PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO,  MUNECA_DENTRO_POCO,  CODO_MEDIO   },
+  { "Puno cerrado",      PULGAR_FLEX_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_DENTRO_MEDIO, CODO_ARRIBA  },
+  { "Mano abierta",      PULGAR_FLEX_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_ARRIBA, MUNECA_DENTRO_POCO,  CODO_ABAJO   },
+  { "Senal de paz",      PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_ABIERTO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_DENTRO_MEDIO, CODO_MEDIO   },
+  { "Pulgar arriba",     PULGAR_FLEX_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_ARRIBA, MUNECA_DENTRO_POCO,  CODO_ARRIBA  },
+  { "Senalar",           PULGAR_FLEX_CERRADO,  DEDO_ABIERTO,  DEDO_CERRADO,  DEDO_CERRADO,  PULGAR_VERT_PLANO,  MUNECA_DENTRO_MAX,   CODO_ABAJO   },
+  { "OK",                PULGAR_FLEX_OK,       DEDO_MEDIO,    DEDO_ABIERTO,  DEDO_ABIERTO,  PULGAR_VERT_OK,     MUNECA_DENTRO_POCO,  CODO_MEDIO   },
+  { "Garra",             PULGAR_FLEX_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    DEDO_MEDIO,    PULGAR_VERT_MEDIO,  MUNECA_DENTRO_MEDIO, CODO_ARRIBA  },
 };
 const uint8_t NUM_POSES_MANO = sizeof(POSES_MANO) / sizeof(POSES_MANO[0]);
 
-// Poses del juego "Piedra, papel o tijera"
-const PoseMano JUGADAS_RPS[] = {
-  { "Piedra",  PULGAR_FLEX_CERRADO, DEDO_CERRADO, DEDO_CERRADO, DEDO_CERRADO, PULGAR_VERT_PLANO,  MUNECA_CENTRO, CODO_ARRIBA },
-  { "Papel",   PULGAR_FLEX_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, PULGAR_VERT_ARRIBA, MUNECA_CENTRO, CODO_MEDIO  },
-  { "Tijera",  PULGAR_FLEX_CERRADO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_CERRADO, PULGAR_VERT_PLANO,  MUNECA_CENTRO, CODO_MEDIO  },
-};
-const uint8_t NUM_JUGADAS_RPS = sizeof(JUGADAS_RPS) / sizeof(JUGADAS_RPS[0]);
+// ---------- Poses de los gestos ----------
+// (CODO_ARRIBA = brazo levantado; si no queda bien en el robot, cámbialo aquí)
+const PoseMano POSE_SALUDO_A = { "Saludo A", PULGAR_FLEX_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, PULGAR_VERT_ARRIBA, MUNECA_SALUDO_A, CODO_ARRIBA };
+const PoseMano POSE_SALUDO_B = { "Saludo B", PULGAR_FLEX_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, PULGAR_VERT_ARRIBA, MUNECA_SALUDO_B, CODO_ARRIBA };
 
-// ---------- Modos de funcionamiento (mano) ----------
-const uint8_t MODO_POSES_ALEATORIAS = 0;
-const uint8_t MODO_PIEDRA_PAPEL_TIJERA = 1;
-uint8_t modoActual = MODO_POSES_ALEATORIAS;
+const PoseMano POSE_VEN_A = { "Ven A", PULGAR_FLEX_CERRADO, DEDO_ABIERTO, DEDO_CERRADO, DEDO_CERRADO, PULGAR_VERT_PLANO, MUNECA_DENTRO_MEDIO, CODO_MEDIO };
+const PoseMano POSE_VEN_B = { "Ven B", PULGAR_FLEX_CERRADO, DEDO_MEDIO,   DEDO_CERRADO, DEDO_CERRADO, PULGAR_VERT_PLANO, MUNECA_DENTRO_MEDIO, CODO_MEDIO };
+
+const PoseMano POSE_SILENCIO = { "Silencio", PULGAR_FLEX_CERRADO, DEDO_ABIERTO, DEDO_CERRADO, DEDO_CERRADO, PULGAR_VERT_PLANO, MUNECA_DENTRO_POCO, CODO_ARRIBA };
+
+const PoseMano POSE_ASI_A = { "Asi asi A", PULGAR_FLEX_MEDIO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, PULGAR_VERT_MEDIO, MUNECA_SALUDO_A, CODO_MEDIO };
+const PoseMano POSE_ASI_B = { "Asi asi B", PULGAR_FLEX_MEDIO, DEDO_ABIERTO, DEDO_ABIERTO, DEDO_ABIERTO, PULGAR_VERT_MEDIO, MUNECA_SALUDO_B, CODO_MEDIO };
+
+const PoseMano POSE_TAP_INDICE  = { "Tap indice",  PULGAR_FLEX_MEDIO, DEDO_TAP,   DEDO_MEDIO, DEDO_MEDIO, PULGAR_VERT_MEDIO, MUNECA_DENTRO_POCO, CODO_MEDIO };
+const PoseMano POSE_TAP_CORAZON = { "Tap corazon", PULGAR_FLEX_MEDIO, DEDO_MEDIO, DEDO_TAP,   DEDO_MEDIO, PULGAR_VERT_MEDIO, MUNECA_DENTRO_POCO, CODO_MEDIO };
+const PoseMano POSE_TAP_ANULAR  = { "Tap anular",  PULGAR_FLEX_MEDIO, DEDO_MEDIO, DEDO_MEDIO, DEDO_TAP,   PULGAR_VERT_MEDIO, MUNECA_DENTRO_POCO, CODO_MEDIO };
+
+// Un paso de un gesto: a qué pose ir, en cuánto tiempo y cuánto esperar después
+struct PasoGesto {
+  const PoseMano* pose;
+  uint16_t durMs;
+  uint16_t pausaMs;
+};
+
+struct Gesto {
+  const char* nombre;
+  const PasoGesto* pasos;
+  uint8_t numPasos;
+};
+
+const PasoGesto PASOS_SALUDAR[] = {
+  { &POSE_SALUDO_A, 900, 100 },
+  { &POSE_SALUDO_B, 300, 0 },
+  { &POSE_SALUDO_A, 300, 0 },
+  { &POSE_SALUDO_B, 300, 0 },
+  { &POSE_SALUDO_A, 300, 200 },
+  { &POSES_MANO[0], 1000, 0 },
+};
+
+const PasoGesto PASOS_VEN_AQUI[] = {
+  { &POSE_VEN_A, 900, 100 },
+  { &POSE_VEN_B, 260, 0 },
+  { &POSE_VEN_A, 260, 0 },
+  { &POSE_VEN_B, 260, 0 },
+  { &POSE_VEN_A, 260, 150 },
+  { &POSES_MANO[0], 900, 0 },
+};
+
+const PasoGesto PASOS_SILENCIO[] = {
+  { &POSE_SILENCIO, 900, 1600 },
+  { &POSES_MANO[0], 900, 0 },
+};
+
+const PasoGesto PASOS_ASI_ASI[] = {
+  { &POSE_ASI_A, 800, 0 },
+  { &POSE_ASI_B, 450, 0 },
+  { &POSE_ASI_A, 450, 0 },
+  { &POSE_ASI_B, 450, 0 },
+  { &POSE_ASI_A, 450, 100 },
+  { &POSES_MANO[0], 900, 0 },
+};
+
+const PasoGesto PASOS_TAMBORILEAR[] = {
+  { &POSE_TAP_INDICE,  300, 0 },
+  { &POSE_TAP_CORAZON, 180, 0 },
+  { &POSE_TAP_ANULAR,  180, 0 },
+  { &POSE_TAP_INDICE,  180, 0 },
+  { &POSE_TAP_CORAZON, 180, 0 },
+  { &POSE_TAP_ANULAR,  180, 0 },
+  { &POSES_MANO[0],    500, 0 },
+};
+
+const Gesto GESTOS[] = {
+  { "Saludar",     PASOS_SALUDAR,    sizeof(PASOS_SALUDAR)    / sizeof(PASOS_SALUDAR[0])    },
+  { "Ven aqui",    PASOS_VEN_AQUI,   sizeof(PASOS_VEN_AQUI)   / sizeof(PASOS_VEN_AQUI[0])   },
+  { "Silencio",    PASOS_SILENCIO,   sizeof(PASOS_SILENCIO)   / sizeof(PASOS_SILENCIO[0])   },
+  { "Asi asi",     PASOS_ASI_ASI,    sizeof(PASOS_ASI_ASI)    / sizeof(PASOS_ASI_ASI[0])    },
+  { "Tamborilear", PASOS_TAMBORILEAR, sizeof(PASOS_TAMBORILEAR) / sizeof(PASOS_TAMBORILEAR[0]) },
+};
+const uint8_t NUM_GESTOS = sizeof(GESTOS) / sizeof(GESTOS[0]);
+
+// ---------- Canal + servo de la mano ----------
+struct CanalServoMano {
+  Servo* servo;
+  int limMin;
+  int limMax;
+  Canal c;
+  int ultimo;
+};
+
+CanalServoMano canalesMano[NUM_SERVOS];
+int objetivoMano[NUM_SERVOS];
+
+// Micro-movimientos de los dedos en reposo (grados). 0 = desactivado.
+const uint8_t MICRO_MANO_AMPLITUD = 4;
 
 // ---------- Temporización (mano) ----------
 const uint16_t TIEMPO_MIN_ENTRE_POSES_MS = 3000;
 const uint16_t TIEMPO_MAX_ENTRE_POSES_MS = 7000;
-const uint16_t TIEMPO_MIN_ENTRE_JUGADAS_MS = 4000;
-const uint16_t TIEMPO_MAX_ENTRE_JUGADAS_MS = 8000;
-const uint8_t  PASOS_MOVIMIENTO_SUAVE_MANO = 30;
-const uint8_t  RETARDO_PASO_MS_MANO = 20;
 
 // ---------- Estado (mano) ----------
-PoseMano poseActualMano = POSES_MANO[0];
 unsigned long proximoCambioPose = 0;
-unsigned long proximaJugadaRPS = 0;
+unsigned long proximoMicroMano = 0;
 uint8_t indicePoseAnteriorMano = 0;
-uint8_t indiceJugadaAnterior = 0;
+uint8_t indiceGestoAnterior = 255;
+
+const Gesto* gestoActual = NULL;
+uint8_t pasoGestoActual = 0;
+unsigned long tSiguientePasoGesto = 0;
 
 // ======================================================================
 // =========================== SETUP / LOOP =============================
@@ -299,7 +516,7 @@ void setup() {
   servoIndice.attach(PIN_INDICE);
   servoCorazon.attach(PIN_CORAZON);
   servoAnularMenique.attach(PIN_ANULAR_MENIQUE);
-//  servoPulgarVertical.attach(PIN_PULGAR_VERTICAL);
+  servoPulgarVertical.attach(PIN_PULGAR_VERTICAL);
   servoMuneca.attach(PIN_MUNECA);
   servoCodo.attach(PIN_CODO);
 
@@ -307,67 +524,360 @@ void setup() {
 
   Serial.println(F("=== Humanoide iniciado: cuello + ojos + mano ==="));
 
+  unsigned long ahora = millis();
+
   // --- Cuello: posición inicial ---
   aplicarPoseInstantaneaCuello(POSES_CUELLO[0]);
   poseActualCuello = POSES_CUELLO[0];
   imprimirPoseCuello(POSES_CUELLO[0]);
-  proximoMovimientoCuello = millis() + random(TIEMPO_MIN_ENTRE_MOVIMIENTOS_MS, TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS);
+  proximoMovimientoCuello = ahora + random(TIEMPO_MIN_ENTRE_MOVIMIENTOS_MS, TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS);
 
-  // --- Ojos: posición inicial (abiertos, mirando al centro) ---
-  abrirParpados();
-  servoOjosVertical.write(OJOS_VERTICAL_CENTRO);
-  servoOjosHorizontal.write(OJOS_HORIZONTAL_CENTRO);
-  verticalActual = OJOS_VERTICAL_CENTRO;
-  horizontalActual = OJOS_HORIZONTAL_CENTRO;
-  proximoParpadeo = millis() + random(PARPADEO_MIN_MS, PARPADEO_MAX_MS);
-  proximaMirada = millis() + random(MIRADA_MIN_MS, MIRADA_MAX_MS);
+  // --- Ojos y mano ---
+  iniciarOjos(ahora);
+  iniciarMano(ahora);
 
-  // --- Mano: posición inicial ---
-  mostrarMenuModos();
-  aplicarPoseInstantaneaMano(POSES_MANO[0]);
-  poseActualMano = POSES_MANO[0];
-  imprimirPoseMano(POSES_MANO[0]);
-  proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
-  proximaJugadaRPS = millis() + random(TIEMPO_MIN_ENTRE_JUGADAS_MS, TIEMPO_MAX_ENTRE_JUGADAS_MS);
+  // --- Ánimo inicial ---
+  proximoCambioAnimo = ahora + random(60000L, 180000L);
+  Serial.print(F("Animo: "));
+  Serial.println(perfil->nombre);
+  mostrarAyuda();
 }
 
 void loop() {
-  // --- Mano: lee cambios de modo por Serial y ejecuta su lógica ---
-  leerCambioDeModo();
-  if (modoActual == MODO_PIEDRA_PAPEL_TIJERA) {
-    loopPiedraPapelTijera();
-  } else {
-    loopPosesAleatorias();
+  unsigned long ahora = millis();
+
+  leerSerie(ahora);
+  actualizarAnimo(ahora);
+
+  loopCuello(ahora);
+  loopOjos(ahora);
+  loopMano(ahora);
+}
+
+// ======================================================================
+// ===================== FUNCIONES: UTILIDADES ==========================
+// ======================================================================
+
+int redondear(float x) {
+  return (int)(x >= 0 ? x + 0.5f : x - 0.5f);
+}
+
+unsigned long escalar(unsigned long ms, float factor) {
+  return (unsigned long)(ms * factor);
+}
+
+// Tiempo aleatorio sesgado hacia valores cortos: muchos tiempos cortos y
+// de vez en cuando uno largo (más natural que un reparto uniforme).
+unsigned long duracionAzar(unsigned long minMs, unsigned long maxMs, float factor) {
+  float u = random(0, 1001) / 1000.0f;
+  float d = minMs + (maxMs - minMs) * u * u;
+  return (unsigned long)(d * factor);
+}
+
+// Número aleatorio con forma de campana (la mayoría cerca de la media).
+float gauss(float media, float desviacion) {
+  float suma = 0;
+  for (uint8_t i = 0; i < 4; i++) {
+    suma += random(0, 1001) / 1000.0f;
   }
+  return media + (suma - 2.0f) * 1.73f * desviacion;
+}
 
-  // --- Ojos: parpadeo y mirada ---
-  loopOjos();
+void fijarCanal(Canal &c, float v) {
+  c.valor = v;
+  c.desde = v;
+  c.hasta = v;
+  c.inicio = 0;
+  c.dur = 1;
+  c.activo = false;
+}
 
-  // --- Cuello: movimiento lento de cabeza ---
-  loopCuello();
+void moverCanalConRetraso(Canal &c, float destino, unsigned long dur, unsigned long ahora, unsigned long retraso) {
+  c.desde = c.valor;
+  c.hasta = destino;
+  c.inicio = ahora + retraso;
+  c.dur = (dur < 1) ? 1 : dur;
+  c.activo = true;
+}
+
+void moverCanal(Canal &c, float destino, unsigned long dur, unsigned long ahora) {
+  moverCanalConRetraso(c, destino, dur, ahora, 0);
+}
+
+// Avanza el canal. Devuelve true si el valor ha cambiado.
+bool actualizarCanal(Canal &c, unsigned long ahora) {
+  if (!c.activo) {
+    return false;
+  }
+  if ((long)(ahora - c.inicio) < 0) {
+    return false;              // todavía en el retraso inicial
+  }
+  unsigned long t = ahora - c.inicio;
+  float nuevo;
+  if (t >= c.dur) {
+    nuevo = c.hasta;
+    c.activo = false;
+  } else {
+    float x = (float)t / (float)c.dur;
+    float s = x * x * (3.0f - 2.0f * x);   // arranque y frenada suaves
+    nuevo = c.desde + (c.hasta - c.desde) * s;
+  }
+  bool cambio = (nuevo != c.valor);
+  c.valor = nuevo;
+  return cambio;
+}
+
+void escribirSiCambia(Servo &servo, int &ultimo, int angulo) {
+  if (angulo != ultimo) {
+    servo.write(angulo);
+    ultimo = angulo;
+  }
+}
+
+// ======================================================================
+// ============ FUNCIONES: ÁNIMO, SERIE, DORMIR Y DESPERTAR =============
+// ======================================================================
+
+void mostrarAyuda() {
+  Serial.println(F("Comandos: 0 Tranquilo, 1 Curioso, 2 Somnoliento, 3 Alerta, 4 Timido"));
+  Serial.println(F("          d dormir, a despertar, g gesto de mano, ? ayuda"));
+}
+
+void leerSerie(unsigned long ahora) {
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c >= '0' && c < ('0' + NUM_ANIMOS)) {
+      if (durmiendo) {
+        Serial.println(F("Esta durmiendo. Usa 'a' para despertarlo."));
+      } else {
+        cambiarAnimo(c - '0', ahora);
+      }
+    } else if (c == 'd') {
+      dormir(ahora);
+    } else if (c == 'a') {
+      despertar(ahora);
+    } else if (c == 'g') {
+      if (!durmiendo && gestoActual == NULL) {
+        iniciarGestoAleatorio(ahora);
+      }
+    } else if (c == '?') {
+      mostrarAyuda();
+    }
+  }
+}
+
+uint8_t elegirAnimo() {
+  uint8_t nuevo = 0;
+  do {
+    uint8_t r = random(100);
+    uint8_t acumulado = 0;
+    for (uint8_t i = 0; i < NUM_ANIMOS; i++) {
+      acumulado += PESO_ANIMO[i];
+      if (r < acumulado) {
+        nuevo = i;
+        break;
+      }
+    }
+  } while (nuevo == animoActual);
+  return nuevo;
+}
+
+// Nivel de cierre "en reposo" de los párpados según hacia dónde mira y el ánimo.
+float calcularParpBase(int vertical) {
+  float caida = perfil->caidaParpado;
+  if (vertical > OJOS_VERTICAL_CENTRO) {
+    caida += (float)(vertical - OJOS_VERTICAL_CENTRO) * PARPADO_BAJADA_MIRADA_PCT / (float)(OJOS_VERTICAL_ABAJO - OJOS_VERTICAL_CENTRO);
+  }
+  if (caida > 60) {
+    caida = 60;
+  }
+  return caida;
+}
+
+void cambiarAnimo(uint8_t nuevo, unsigned long ahora) {
+  animoActual = nuevo;
+  perfil = &PERFILES[nuevo];
+  proximoCambioAnimo = ahora + random(60000L, 180000L);
+
+  parpBase = calcularParpBase(objetivoV);
+  if (faseParp == 0) {
+    moverParpadosABase(900, ahora);
+  }
+  proximoParpadeo = ahora + duracionAzar(PARPADEO_MIN_MS, PARPADEO_MAX_MS, perfil->factorParpadeo);
+
+  Serial.print(F("Animo: "));
+  Serial.println(perfil->nombre);
+}
+
+void actualizarAnimo(unsigned long ahora) {
+  if (durmiendo) {
+    // Despertar automático (solo si se durmió solo)
+    if (despertarAutomatico && faseDespertar == 0 && ahora >= tDespertarAutomatico) {
+      despertar(ahora);
+    }
+    return;
+  }
+  if (ahora >= proximoCambioAnimo) {
+    if (SUENO_AUTOMATICO && animoActual == ANIMO_SOMNOLIENTO && random(100) < 40) {
+      dormir(ahora);
+      despertarAutomatico = true;
+      tDespertarAutomatico = ahora + random(25000L, 50000L);
+    } else {
+      cambiarAnimo(elegirAnimo(), ahora);
+    }
+  }
+}
+
+void dormir(unsigned long ahora) {
+  if (durmiendo) {
+    return;
+  }
+  durmiendo = true;
+  despertarAutomatico = false;
+  faseDespertar = 0;
+  Serial.println(F("Durmiendo..."));
+
+  // Ojos: se cierran despacio y quedan mirando algo hacia abajo
+  faseParp = 0;
+  reojoPendiente = false;
+  miradaFija = false;
+  parpBase = 100;
+  moverCanal(cParpIzq, 100, 1600, ahora);
+  moverCanal(cParpDer, 100, 1600, ahora);
+  int v = OJOS_VERTICAL_CENTRO + 6;
+  moverCanal(cVert, v, 1600, ahora);
+  moverCanal(cHoriz, OJOS_HORIZONTAL_CENTRO, 1600, ahora);
+  objetivoV = v;
+  objetivoH = OJOS_HORIZONTAL_CENTRO;
+
+  // Mano: se relaja despacio
+  gestoActual = NULL;
+  aplicarPoseMano(POSES_MANO[0], 2.5f, ahora);
+  indicePoseAnteriorMano = 0;
+}
+
+void despertar(unsigned long ahora) {
+  if (!durmiendo || faseDespertar != 0) {
+    return;
+  }
+  faseDespertar = 1;
+  tFaseDespertar = ahora;
+  Serial.println(F("Despertando..."));
+}
+
+// Secuencia: entreabre los ojos, parpadeo lento, mira alrededor y queda somnoliento.
+void actualizarDespertar(unsigned long ahora) {
+  if (faseDespertar == 0 || ahora < tFaseDespertar) {
+    return;
+  }
+  switch (faseDespertar) {
+    case 1:
+      moverCanal(cParpIzq, 55, 900, ahora);
+      moverCanal(cParpDer, 55, 900, ahora);
+      tFaseDespertar = ahora + 1400;
+      faseDespertar = 2;
+      break;
+    case 2:
+      moverCanal(cParpIzq, 90, 350, ahora);
+      moverCanal(cParpDer, 90, 350, ahora);
+      tFaseDespertar = ahora + 800;
+      faseDespertar = 3;
+      break;
+    case 3: {
+      moverCanal(cParpIzq, 45, 900, ahora);
+      moverCanal(cParpDer, 45, 900, ahora);
+      int v = redondear(gauss(OJOS_VERTICAL_CENTRO, 4));
+      int h = redondear(gauss(OJOS_HORIZONTAL_CENTRO, 5));
+      v = constrain(v, OJOS_VERTICAL_ARRIBA, OJOS_VERTICAL_ABAJO);
+      h = constrain(h, OJOS_HORIZONTAL_IZQUIERDA, OJOS_HORIZONTAL_DERECHA);
+      moverCanal(cVert, v, 900, ahora);
+      moverCanal(cHoriz, h, 900, ahora);
+      objetivoV = v;
+      objetivoH = h;
+      tFaseDespertar = ahora + 1600;
+      faseDespertar = 4;
+      break;
+    }
+    case 4:
+      durmiendo = false;
+      faseDespertar = 0;
+      despertarAutomatico = false;
+      cambiarAnimo(ANIMO_SOMNOLIENTO, ahora);
+      proximoCambioAnimo = ahora + 40000UL;      // un rato somnoliento y luego cambia solo
+      proximaMirada = ahora + 800;
+      proximoGuino = ahora + random(GUINO_MIN_MS, GUINO_MAX_MS);
+      proximoCambioPose = ahora + 3000;
+      proximoMovimientoCuello = ahora + random(TIEMPO_MIN_ENTRE_MOVIMIENTOS_MS, TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS);
+      Serial.println(F("Despierto."));
+      break;
+  }
 }
 
 // ======================================================================
 // ======================= FUNCIONES: CUELLO =============================
+// (Mismas poses, mismos ángulos, mismos 85 pasos de 40 ms y mismos tiempos
+//  de espera. Solo cambia que ya no bloquea el resto del programa.)
 // ======================================================================
 
-void loopCuello() {
-  if (millis() >= proximoMovimientoCuello) {
-    uint8_t indiceNuevaPose = elegirPoseDistintaCuello(indicePoseAnteriorCuello);
-    Serial.print(F("Nuevo movimiento de cuello -> "));
-    Serial.println(POSES_CUELLO[indiceNuevaPose].nombre);
+void loopCuello(unsigned long ahora) {
+  switch (estadoCuello) {
 
-    moverAPoseSuaveCuello(POSES_CUELLO[indiceNuevaPose]);
-    poseActualCuello = POSES_CUELLO[indiceNuevaPose];
-    indicePoseAnteriorCuello = indiceNuevaPose;
+    case CUELLO_ESPERA:
+      if (durmiendo) {
+        return;
+      }
+      if (ahora >= proximoMovimientoCuello) {
+        uint8_t indiceNuevaPose = elegirPoseDistintaCuello(indicePoseAnteriorCuello);
+        Serial.print(F("Nuevo movimiento de cuello -> "));
+        Serial.println(POSES_CUELLO[indiceNuevaPose].nombre);
 
-    imprimirPoseCuello(POSES_CUELLO[indiceNuevaPose]);
+        destinoCuello = &POSES_CUELLO[indiceNuevaPose];
+        indiceDestinoCuello = indiceNuevaPose;
 
-    proximoMovimientoCuello = millis() + random(TIEMPO_MIN_ENTRE_MOVIMIENTOS_MS, TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS);
+        // Los ojos se adelantan un instante hacia donde va a girar la cabeza
+        ojosAnticiparCuello(destinoCuello->rotacion, ahora);
+        tInicioCuello = ahora + ADELANTO_OJOS_MS;
+        estadoCuello = CUELLO_PREPARANDO;
+      }
+      break;
+
+    case CUELLO_PREPARANDO:
+      if (ahora >= tInicioCuello) {
+        origenCuello = poseActualCuello;
+        pasoCuello = 0;
+        tProximoPasoCuello = ahora;
+        estadoCuello = CUELLO_MOVIENDO;
+      }
+      break;
+
+    case CUELLO_MOVIENDO:
+      if (ahora >= tProximoPasoCuello) {
+        pasoCuello++;
+        servoInclinacionIzquierda.write(map(pasoCuello, 0, PASOS_MOVIMIENTO_SUAVE_CUELLO, origenCuello.inclinacionIzquierda, destinoCuello->inclinacionIzquierda));
+        servoInclinacionDerecha.write(map(pasoCuello, 0, PASOS_MOVIMIENTO_SUAVE_CUELLO, origenCuello.inclinacionDerecha, destinoCuello->inclinacionDerecha));
+        servoRotacion.write(map(pasoCuello, 0, PASOS_MOVIMIENTO_SUAVE_CUELLO, origenCuello.rotacion, destinoCuello->rotacion));
+        tProximoPasoCuello = ahora + RETARDO_PASO_MS_CUELLO;
+
+        if (pasoCuello == PASO_CUELLO_RECENTRAR_OJOS) {
+          ojosRecentrarConCabeza(ahora);
+        }
+
+        if (pasoCuello >= PASOS_MOVIMIENTO_SUAVE_CUELLO) {
+          poseActualCuello = *destinoCuello;
+          indicePoseAnteriorCuello = indiceDestinoCuello;
+          imprimirPoseCuello(*destinoCuello);
+          proximoMovimientoCuello = ahora + random(TIEMPO_MIN_ENTRE_MOVIMIENTOS_MS, TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS);
+          estadoCuello = CUELLO_ESPERA;
+        }
+      }
+      break;
   }
 }
 
 void imprimirPoseCuello(const PoseCuello &pose) {
+  if (!DEBUG_DETALLE) {
+    return;
+  }
   Serial.print(F("Pose de cuello aplicada: "));
   Serial.println(pose.nombre);
   Serial.print(F("  Inclinacion izquierda: ")); Serial.println(pose.inclinacionIzquierda);
@@ -390,151 +900,361 @@ void aplicarPoseInstantaneaCuello(const PoseCuello &pose) {
   servoRotacion.write(pose.rotacion);
 }
 
-void moverAPoseSuaveCuello(const PoseCuello &destino) {
-  PoseCuello origen = poseActualCuello;
-
-  for (uint16_t paso = 1; paso <= PASOS_MOVIMIENTO_SUAVE_CUELLO; paso++) {
-    servoInclinacionIzquierda.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE_CUELLO, origen.inclinacionIzquierda, destino.inclinacionIzquierda));
-    servoInclinacionDerecha.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE_CUELLO, origen.inclinacionDerecha, destino.inclinacionDerecha));
-    servoRotacion.write(map(paso, 0, PASOS_MOVIMIENTO_SUAVE_CUELLO, origen.rotacion, destino.rotacion));
-    delay(RETARDO_PASO_MS_CUELLO);
-  }
-}
-
 // ======================================================================
 // ======================== FUNCIONES: OJOS ===============================
 // ======================================================================
 
-void loopOjos() {
-  unsigned long ahora = millis();
+void iniciarOjos(unsigned long ahora) {
+  fijarCanal(cVert, OJOS_VERTICAL_CENTRO);
+  fijarCanal(cHoriz, OJOS_HORIZONTAL_CENTRO);
+  fijarCanal(cParpIzq, 0);
+  fijarCanal(cParpDer, 0);
+  objetivoV = OJOS_VERTICAL_CENTRO;
+  objetivoH = OJOS_HORIZONTAL_CENTRO;
+  parpBase = 0;
+  escribirOjos();
 
-  if (ahora >= proximoParpadeo) {
-    parpadear();
-    if (random(100) < PROBABILIDAD_DOBLE_PARPADEO) {
-      delay(150);
-      parpadear();
+  proximoParpadeo = ahora + duracionAzar(PARPADEO_MIN_MS, PARPADEO_MAX_MS, 1.0f);
+  proximoGuino = ahora + random(GUINO_MIN_MS, GUINO_MAX_MS);
+  proximaMirada = ahora + random(MIRADA_MIN_MS, MIRADA_MAX_MS);
+  proximoMicro = ahora + random(700, 2200);
+}
+
+// Ángulo de un párpado según su % de cierre. Siempre entre "abierto" y "cerrado".
+int anguloParpado(int abierto, int cerrado, float pct) {
+  if (pct < 0) {
+    pct = 0;
+  }
+  if (pct > 100) {
+    pct = 100;
+  }
+  return redondear(abierto + (cerrado - abierto) * pct / 100.0f);
+}
+
+// Escribe en los servos de los ojos (solo si el ángulo ha cambiado).
+// Los límites se aplican SIEMPRE aquí, pase lo que pase antes.
+void escribirOjos() {
+  int v = redondear(cVert.valor);
+  int h = redondear(cHoriz.valor);
+  v = constrain(v, OJOS_VERTICAL_ARRIBA, OJOS_VERTICAL_ABAJO);
+  h = constrain(h, OJOS_HORIZONTAL_IZQUIERDA, OJOS_HORIZONTAL_DERECHA);
+  escribirSiCambia(servoOjosVertical, ultVertical, v);
+  escribirSiCambia(servoOjosHorizontal, ultHorizontal, h);
+
+  escribirSiCambia(servoParpadoSupIzq, ultSupIzq, anguloParpado(PARPADO_SUP_IZQ_ABIERTO, PARPADO_SUP_IZQ_CERRADO, cParpIzq.valor));
+  escribirSiCambia(servoParpadoInfIzq, ultInfIzq, anguloParpado(PARPADO_INF_IZQ_ABIERTO, PARPADO_INF_IZQ_CERRADO, cParpIzq.valor));
+  escribirSiCambia(servoParpadoSupDer, ultSupDer, anguloParpado(PARPADO_SUP_DER_ABIERTO, PARPADO_SUP_DER_CERRADO, cParpDer.valor));
+  escribirSiCambia(servoParpadoInfDer, ultInfDer, anguloParpado(PARPADO_INF_DER_ABIERTO, PARPADO_INF_DER_CERRADO, cParpDer.valor));
+}
+
+void moverParpadosABase(unsigned long dur, unsigned long ahora) {
+  moverCanal(cParpIzq, parpBase, dur, ahora);
+  moverCanal(cParpDer, parpBase, dur, ahora);
+}
+
+// ---------- Gestos de párpados (parpadeos y guiño) ----------
+
+void iniciarGestoParpados(bool izq, bool der, unsigned long durCierre, unsigned long mantener,
+                          unsigned long durApertura, uint8_t repeticiones, unsigned long pausa,
+                          unsigned long ahora) {
+  gestoIzq = izq;
+  gestoDer = der;
+  durCierreParp = durCierre;
+  mantenerParp = mantener;
+  durAperturaParp = durApertura;
+  repeticionesParp = repeticiones;
+  pausaParp = pausa;
+  faseParp = 1;
+  if (izq) {
+    moverCanal(cParpIzq, 100, durCierre, ahora);
+  }
+  if (der) {
+    moverCanal(cParpDer, 100, durCierre, ahora);
+  }
+}
+
+bool parpadosMoviendose() {
+  return (gestoIzq && cParpIzq.activo) || (gestoDer && cParpDer.activo);
+}
+
+void actualizarGestoParpados(unsigned long ahora) {
+  switch (faseParp) {
+    case 1:   // cerrando
+      if (!parpadosMoviendose()) {
+        faseParp = 2;
+        finFaseParp = ahora + mantenerParp;
+      }
+      break;
+    case 2:   // cerrado un instante
+      if (ahora >= finFaseParp) {
+        if (gestoIzq) {
+          moverCanal(cParpIzq, parpBase, durAperturaParp, ahora);
+        }
+        if (gestoDer) {
+          moverCanal(cParpDer, parpBase, durAperturaParp, ahora);
+        }
+        faseParp = 3;
+      }
+      break;
+    case 3:   // abriendo
+      if (!parpadosMoviendose()) {
+        if (repeticionesParp > 1) {
+          repeticionesParp--;
+          faseParp = 4;
+          finFaseParp = ahora + pausaParp;
+        } else {
+          faseParp = 0;
+        }
+      }
+      break;
+    case 4:   // pausa entre parpadeos (parpadeo doble)
+      if (ahora >= finFaseParp) {
+        if (gestoIzq) {
+          moverCanal(cParpIzq, 100, durCierreParp, ahora);
+        }
+        if (gestoDer) {
+          moverCanal(cParpDer, 100, durCierreParp, ahora);
+        }
+        faseParp = 1;
+      }
+      break;
+  }
+}
+
+// Parpadeo normal (rápido), doble o lento, según el ánimo.
+void iniciarParpadeoNatural(unsigned long ahora) {
+  uint8_t r = random(100);
+  if (r < PROB_PARPADEO_DOBLE) {
+    iniciarGestoParpados(true, true, 70, random(30, 60), 110, 2, random(120, 220), ahora);
+  } else if (r < PROB_PARPADEO_DOBLE + perfil->probLento) {
+    iniciarGestoParpados(true, true, 220, random(150, 300), 260, 1, 0, ahora);
+  } else {
+    iniciarGestoParpados(true, true, 70, random(40, 90), 110, 1, 0, ahora);
+  }
+}
+
+// Guiño: cierra solo un ojo (izquierdo o derecho al azar) un momento.
+void iniciarGuino(unsigned long ahora) {
+  bool ojoIzquierdo = (random(2) == 0);
+  iniciarGestoParpados(ojoIzquierdo, !ojoIzquierdo, 90, random(300, 500), 160, 1, 0, ahora);
+}
+
+// ---------- Mirada ----------
+
+int amplitudMirada(int v, int h) {
+  int dv = abs(v - redondear(cVert.valor));
+  int dh = abs(h - redondear(cHoriz.valor));
+  return (dv > dh) ? dv : dh;
+}
+
+// Movimiento rápido y suave hacia un punto. Respeta siempre los límites.
+void iniciarSacada(int v, int h, bool conParpadeo, unsigned long ahora) {
+  v = constrain(v, OJOS_VERTICAL_ARRIBA, OJOS_VERTICAL_ABAJO);
+  h = constrain(h, OJOS_HORIZONTAL_IZQUIERDA, OJOS_HORIZONTAL_DERECHA);
+
+  int amplitud = amplitudMirada(v, h);
+  unsigned long dur = escalar(70 + amplitud * 3, perfil->factorVelOjos);
+  moverCanal(cVert, v, dur, ahora);
+  moverCanal(cHoriz, h, dur, ahora);
+  objetivoV = v;
+  objetivoH = h;
+
+  parpBase = calcularParpBase(v);
+  if (faseParp == 0) {
+    if (conParpadeo) {
+      iniciarGestoParpados(true, true, 60, random(30, 60), 100, 1, 0, ahora);
+    } else {
+      moverParpadosABase(dur + 100, ahora);
     }
-    proximoParpadeo = millis() + random(PARPADEO_MIN_MS, PARPADEO_MAX_MS);
+  }
+}
+
+// Elige a dónde mirar y cuánto tiempo se queda ahí.
+void nuevaMirada(unsigned long ahora) {
+  int v;
+  int h;
+  unsigned long fijacion;
+  bool esReojo = false;
+  int centroV = OJOS_VERTICAL_CENTRO + perfil->sesgoVertical;
+
+  if (reojoPendiente) {
+    // Vuelve al punto que miraba antes del vistazo de reojo
+    v = reojoRetornoV;
+    h = reojoRetornoH;
+    reojoPendiente = false;
+    miradaFija = false;
+    fijacion = duracionAzar(MIRADA_MIN_MS, MIRADA_MAX_MS, perfil->factorFijacion);
+  } else {
+    uint8_t r = random(100);
+
+    if (r < perfil->probReojo) {
+      // Vistazo rápido de reojo a un lado, y luego vuelve
+      esReojo = true;
+      h = (random(2) == 0) ? OJOS_HORIZONTAL_IZQUIERDA : OJOS_HORIZONTAL_DERECHA;
+      v = objetivoV + random(-3, 4);
+      reojoRetornoV = objetivoV;
+      reojoRetornoH = objetivoH;
+      reojoPendiente = true;
+      miradaFija = false;
+      fijacion = random(600, 1300);
+    } else if (r < perfil->probReojo + perfil->probAmplia) {
+      // Mirada amplia a cualquier punto permitido
+      v = random(OJOS_VERTICAL_ARRIBA, OJOS_VERTICAL_ABAJO + 1);
+      h = random(OJOS_HORIZONTAL_IZQUIERDA, OJOS_HORIZONTAL_DERECHA + 1);
+    } else if (random(100) < 45) {
+      // Vuelve cerca del centro (mirada "en reposo"), con la campana de Gauss
+      v = redondear(gauss(centroV, 4));
+      h = redondear(gauss(OJOS_HORIZONTAL_CENTRO, 5));
+    } else {
+      // Pequeño desplazamiento desde donde está mirando
+      v = redondear(gauss(objetivoV, 6));
+      h = redondear(gauss(objetivoH, 8));
+    }
+
+    if (!esReojo) {
+      if (random(100) < perfil->probFija) {
+        miradaFija = true;
+        fijacion = random(MIRADA_FIJA_MIN_MS, MIRADA_FIJA_MAX_MS);
+      } else {
+        miradaFija = false;
+        fijacion = duracionAzar(MIRADA_MIN_MS, MIRADA_MAX_MS, perfil->factorFijacion);
+      }
+    }
   }
 
+  // Nunca salir de los límites
+  v = constrain(v, OJOS_VERTICAL_ARRIBA, OJOS_VERTICAL_ABAJO);
+  h = constrain(h, OJOS_HORIZONTAL_IZQUIERDA, OJOS_HORIZONTAL_DERECHA);
+
+  // En cambios grandes de mirada a veces se parpadea a la vez
+  bool conParpadeo = (!esReojo && faseParp == 0 && amplitudMirada(v, h) >= 12 && random(100) < PROB_PARPADEO_CON_MIRADA);
+
+  iniciarSacada(v, h, conParpadeo, ahora);
+
+  if (conParpadeo) {
+    proximoParpadeo = ahora + duracionAzar(PARPADEO_MIN_MS, PARPADEO_MAX_MS, perfil->factorParpadeo);
+  }
+  proximaMirada = ahora + fijacion;
+  proximoMicro = ahora + random(700, 2200);
+}
+
+// ---------- Coordinación con cuello y mano ----------
+
+// Antes de que el cuello gire, los ojos ya miran hacia allí.
+void ojosAnticiparCuello(int rotacionDestino, unsigned long ahora) {
+  if (durmiendo) {
+    return;
+  }
+  int h;
+  if (rotacionDestino < NEUTRO) {
+    h = OJOS_HORIZONTAL_IZQUIERDA + 2;
+  } else if (rotacionDestino > NEUTRO) {
+    h = OJOS_HORIZONTAL_DERECHA - 2;
+  } else {
+    return;                              // sin giro: los ojos siguen a lo suyo
+  }
+  miradaFija = false;
+  reojoPendiente = false;
+  iniciarSacada(objetivoV, h, false, ahora);
+  proximaMirada = ahora + 4500;          // se mantienen ahí hasta que el cuello los recentre
+}
+
+// Cuando la cabeza ya va llegando, los ojos vuelven cerca del centro.
+void ojosRecentrarConCabeza(unsigned long ahora) {
+  if (durmiendo) {
+    return;
+  }
+  int v = redondear(gauss(OJOS_VERTICAL_CENTRO + perfil->sesgoVertical, 3));
+  int h = redondear(gauss(OJOS_HORIZONTAL_CENTRO, 3));
+  miradaFija = false;
+  reojoPendiente = false;
+  iniciarSacada(v, h, false, ahora);
+  proximaMirada = ahora + duracionAzar(MIRADA_MIN_MS, MIRADA_MAX_MS, perfil->factorFijacion);
+}
+
+// Los ojos echan un vistazo a la mano cuando hace un gesto.
+void ojosMirarMano(unsigned long ahora) {
+  if (durmiendo) {
+    return;
+  }
+  miradaFija = false;
+  reojoPendiente = false;
+  iniciarSacada(MIRAR_MANO_VERTICAL, MIRAR_MANO_HORIZONTAL, false, ahora);
+  proximaMirada = ahora + random(1500, 2800);
+}
+
+// ---------- Bucle de los ojos ----------
+
+void loopOjos(unsigned long ahora) {
+  // Mueve todos los canales
+  actualizarCanal(cVert, ahora);
+  actualizarCanal(cHoriz, ahora);
+  actualizarCanal(cParpIzq, ahora);
+  actualizarCanal(cParpDer, ahora);
+
+  if (durmiendo) {
+    actualizarDespertar(ahora);
+    escribirOjos();
+    return;
+  }
+
+  actualizarGestoParpados(ahora);
+
+  // Guiño (raro) o parpadeo
+  if (faseParp == 0) {
+    if (ahora >= proximoGuino) {
+      if (animoActual != ANIMO_SOMNOLIENTO) {
+        iniciarGuino(ahora);
+      }
+      proximoGuino = ahora + random(GUINO_MIN_MS, GUINO_MAX_MS);
+      proximoParpadeo = ahora + duracionAzar(PARPADEO_MIN_MS, PARPADEO_MAX_MS, perfil->factorParpadeo);
+    } else if (ahora >= proximoParpadeo) {
+      iniciarParpadeoNatural(ahora);
+      proximoParpadeo = ahora + duracionAzar(PARPADEO_MIN_MS, PARPADEO_MAX_MS, perfil->factorParpadeo);
+    }
+  }
+
+  // Cambio de mirada o micro-movimientos mientras fija un punto
   if (ahora >= proximaMirada) {
-    moverMiradaAleatoria();
-    proximaMirada = millis() + random(MIRADA_MIN_MS, MIRADA_MAX_MS);
-  }
-}
-
-void parpadear() {
-  cerrarParpados();
-  delay(PARPADEO_DURACION_MS);
-  abrirParpados();
-}
-
-void cerrarParpados() {
-  servoParpadoSupIzq.write(PARPADO_SUP_IZQ_CERRADO);
-  servoParpadoSupDer.write(PARPADO_SUP_DER_CERRADO);
-  servoParpadoInfIzq.write(PARPADO_INF_IZQ_CERRADO);
-  servoParpadoInfDer.write(PARPADO_INF_DER_CERRADO);
-}
-
-void abrirParpados() {
-  servoParpadoSupIzq.write(PARPADO_SUP_IZQ_ABIERTO);
-  servoParpadoSupDer.write(PARPADO_SUP_DER_ABIERTO);
-  servoParpadoInfIzq.write(PARPADO_INF_IZQ_ABIERTO);
-  servoParpadoInfDer.write(PARPADO_INF_DER_ABIERTO);
-}
-
-void moverMiradaAleatoria() {
-  int nuevoVertical = random(OJOS_VERTICAL_ARRIBA, OJOS_VERTICAL_ABAJO + 1);
-  int nuevoHorizontal = random(OJOS_HORIZONTAL_IZQUIERDA, OJOS_HORIZONTAL_DERECHA + 1);
-  moverMiradaSuave(nuevoVertical, nuevoHorizontal);
-}
-
-void moverMiradaSuave(int destinoVertical, int destinoHorizontal) {
-  int origenVertical = verticalActual;
-  int origenHorizontal = horizontalActual;
-
-  for (uint8_t paso = 1; paso <= PASOS_MOVIMIENTO_SUAVE_OJOS; paso++) {
-    int v = map(paso, 0, PASOS_MOVIMIENTO_SUAVE_OJOS, origenVertical, destinoVertical);
-    int h = map(paso, 0, PASOS_MOVIMIENTO_SUAVE_OJOS, origenHorizontal, destinoHorizontal);
-    servoOjosVertical.write(v);
-    servoOjosHorizontal.write(h);
-    delay(RETARDO_PASO_MS_OJOS);
+    nuevaMirada(ahora);
+  } else if (MICRO_AMPLITUD > 0 && !miradaFija && !reojoPendiente && ahora >= proximoMicro
+             && !cVert.activo && !cHoriz.activo) {
+    int v = objetivoV + random(-(int)MICRO_AMPLITUD, (int)MICRO_AMPLITUD + 1);
+    int h = objetivoH + random(-(int)MICRO_AMPLITUD, (int)MICRO_AMPLITUD + 1);
+    v = constrain(v, OJOS_VERTICAL_ARRIBA, OJOS_VERTICAL_ABAJO);
+    h = constrain(h, OJOS_HORIZONTAL_IZQUIERDA, OJOS_HORIZONTAL_DERECHA);
+    moverCanal(cVert, v, 120, ahora);
+    moverCanal(cHoriz, h, 120, ahora);
+    proximoMicro = ahora + random(700, 2200);
   }
 
-  verticalActual = destinoVertical;
-  horizontalActual = destinoHorizontal;
+  escribirOjos();
 }
 
 // ======================================================================
 // ======================== FUNCIONES: MANO ===============================
 // ======================================================================
 
-void mostrarMenuModos() {
-  Serial.println(F("Escribe un numero y pulsa Enter para cambiar de modo:"));
-  Serial.println(F("  0 -> Poses aleatorias (por defecto)"));
-  Serial.println(F("  1 -> Piedra, papel o tijera"));
-}
+void iniciarMano(unsigned long ahora) {
+  canalesMano[M_PULGAR_FLEX]  = { &servoPulgarFlexion,  LIM_MIN_PULGAR_FLEX,     LIM_MAX_PULGAR_FLEX,     {0, 0, 0, 0, 1, false}, -1 };
+  canalesMano[M_INDICE]       = { &servoIndice,         LIM_MIN_INDICE,          LIM_MAX_INDICE,          {0, 0, 0, 0, 1, false}, -1 };
+  canalesMano[M_CORAZON]      = { &servoCorazon,        LIM_MIN_CORAZON,         LIM_MAX_CORAZON,         {0, 0, 0, 0, 1, false}, -1 };
+  canalesMano[M_ANULAR]       = { &servoAnularMenique,  LIM_MIN_ANULAR_MENIQUE,  LIM_MAX_ANULAR_MENIQUE,  {0, 0, 0, 0, 1, false}, -1 };
+  canalesMano[M_PULGAR_VERT]  = { &servoPulgarVertical, LIM_MIN_PULGAR_VERTICAL, LIM_MAX_PULGAR_VERTICAL, {0, 0, 0, 0, 1, false}, -1 };
+  canalesMano[M_MUNECA]       = { &servoMuneca,         LIM_MIN_MUNECA,          LIM_MAX_MUNECA,          {0, 0, 0, 0, 1, false}, -1 };
+  canalesMano[M_CODO]         = { &servoCodo,           LIM_MIN_CODO,            LIM_MAX_CODO,            {0, 0, 0, 0, 1, false}, -1 };
 
-void leerCambioDeModo() {
-  if (Serial.available() == 0) {
-    return;
-  }
+  aplicarPoseInstantaneaMano(POSES_MANO[0]);
+  imprimirPoseMano(POSES_MANO[0]);
 
-  int valor = Serial.parseInt();
-  while (Serial.available() > 0) {
-    Serial.read();
-  }
-
-  if (valor != MODO_POSES_ALEATORIAS && valor != MODO_PIEDRA_PAPEL_TIJERA) {
-    Serial.println(F("Modo invalido. Usa 0 (poses aleatorias) o 1 (piedra, papel o tijera)."));
-    return;
-  }
-
-  modoActual = valor;
-  Serial.print(F("Modo cambiado a: "));
-  Serial.println(modoActual == MODO_PIEDRA_PAPEL_TIJERA ? F("Piedra, papel o tijera") : F("Poses aleatorias"));
-
-  proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
-  proximaJugadaRPS = millis() + random(TIEMPO_MIN_ENTRE_JUGADAS_MS, TIEMPO_MAX_ENTRE_JUGADAS_MS);
-}
-
-void loopPosesAleatorias() {
-  if (millis() >= proximoCambioPose) {
-    uint8_t indiceNuevaPose = elegirPoseDistintaMano(indicePoseAnteriorMano);
-    Serial.print(F("Nueva pose seleccionada -> "));
-    Serial.println(POSES_MANO[indiceNuevaPose].nombre);
-
-    moverAPoseSuaveMano(POSES_MANO[indiceNuevaPose]);
-    poseActualMano = POSES_MANO[indiceNuevaPose];
-    indicePoseAnteriorMano = indiceNuevaPose;
-
-    imprimirPoseMano(POSES_MANO[indiceNuevaPose]);
-
-    proximoCambioPose = millis() + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
-  }
-}
-
-void loopPiedraPapelTijera() {
-  if (millis() >= proximaJugadaRPS) {
-    uint8_t indiceNuevaJugada;
-    do {
-      indiceNuevaJugada = random(0, NUM_JUGADAS_RPS);
-    } while (indiceNuevaJugada == indiceJugadaAnterior && NUM_JUGADAS_RPS > 1);
-
-    Serial.print(F("Jugando... -> "));
-    Serial.println(JUGADAS_RPS[indiceNuevaJugada].nombre);
-
-    moverAPoseSuaveMano(JUGADAS_RPS[indiceNuevaJugada]);
-    poseActualMano = JUGADAS_RPS[indiceNuevaJugada];
-    indiceJugadaAnterior = indiceNuevaJugada;
-
-    imprimirPoseMano(JUGADAS_RPS[indiceNuevaJugada]);
-
-    proximaJugadaRPS = millis() + random(TIEMPO_MIN_ENTRE_JUGADAS_MS, TIEMPO_MAX_ENTRE_JUGADAS_MS);
-  }
+  proximoCambioPose = ahora + random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS);
+  proximoMicroMano = ahora + random(4000, 9000);
 }
 
 void imprimirPoseMano(const PoseMano &pose) {
+  if (!DEBUG_DETALLE) {
+    return;
+  }
   Serial.print(F("Pose aplicada: "));
   Serial.println(pose.nombre);
   Serial.print(F("  Pulgar flexion: ")); Serial.println(pose.pulgarFlexion);
@@ -555,37 +1275,198 @@ uint8_t elegirPoseDistintaMano(uint8_t indiceAnterior) {
   return indiceNuevo;
 }
 
-void escribirServoSeguro(Servo &servo, int angulo, int limMin, int limMax) {
-  int anguloSeguro = constrain(angulo, limMin, limMax);
-  servo.write(anguloSeguro);
+// Pose de la mano a un array ordenado según los índices M_*
+void poseAArray(const PoseMano &p, int destino[]) {
+  destino[M_PULGAR_FLEX] = p.pulgarFlexion;
+  destino[M_INDICE]      = p.indice;
+  destino[M_CORAZON]     = p.corazon;
+  destino[M_ANULAR]      = p.anularMenique;
+  destino[M_PULGAR_VERT] = p.pulgarVertical;
+  destino[M_MUNECA]      = p.muneca;
+  destino[M_CODO]        = p.codo;
 }
 
-void escribirMuneca(int anguloLogico) {
-  int anguloFisico = 180 - anguloLogico;
-  escribirServoSeguro(servoMuneca, anguloFisico, LIM_MIN_MUNECA, LIM_MAX_MUNECA);
-}
-
+// Coloca la mano en una pose al instante (solo al arrancar).
 void aplicarPoseInstantaneaMano(const PoseMano &pose) {
-  escribirServoSeguro(servoPulgarFlexion, pose.pulgarFlexion, LIM_MIN_PULGAR_FLEX, LIM_MAX_PULGAR_FLEX);
-  escribirServoSeguro(servoIndice, pose.indice, LIM_MIN_INDICE, LIM_MAX_INDICE);
-  escribirServoSeguro(servoCorazon, pose.corazon, LIM_MIN_CORAZON, LIM_MAX_CORAZON);
-  escribirServoSeguro(servoAnularMenique, pose.anularMenique, LIM_MIN_ANULAR_MENIQUE, LIM_MAX_ANULAR_MENIQUE);
-  escribirServoSeguro(servoPulgarVertical, pose.pulgarVertical, LIM_MIN_PULGAR_VERTICAL, LIM_MAX_PULGAR_VERTICAL);
-  escribirMuneca(pose.muneca);
-  escribirServoSeguro(servoCodo, pose.codo, LIM_MIN_CODO, LIM_MAX_CODO);
+  int destino[NUM_SERVOS];
+  poseAArray(pose, destino);
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    int a = constrain(destino[i], canalesMano[i].limMin, canalesMano[i].limMax);
+    fijarCanal(canalesMano[i].c, a);
+    canalesMano[i].servo->write(a);
+    canalesMano[i].ultimo = a;
+    objetivoMano[i] = a;
+  }
 }
 
-void moverAPoseSuaveMano(const PoseMano &destino) {
-  PoseMano origen = poseActualMano;
+// Transición natural a una pose: brazo primero, muñeca después y los dedos en cascada
+// (al cerrar: meñique -> índice -> pulgar; al abrir: índice -> meñique). El pulgar vertical
+// va siempre despacio. Devuelve cuánto tarda en total (ms).
+unsigned long aplicarPoseMano(const PoseMano &p, float factorVel, unsigned long ahora) {
+  static const uint16_t DUR_BASE[NUM_SERVOS] = { 550, 500, 500, 500, 1100, 750, 1000 };
 
-  for (uint8_t paso = 1; paso <= PASOS_MOVIMIENTO_SUAVE_MANO; paso++) {
-    escribirServoSeguro(servoPulgarFlexion, map(paso, 0, PASOS_MOVIMIENTO_SUAVE_MANO, origen.pulgarFlexion, destino.pulgarFlexion), LIM_MIN_PULGAR_FLEX, LIM_MAX_PULGAR_FLEX);
-    escribirServoSeguro(servoIndice, map(paso, 0, PASOS_MOVIMIENTO_SUAVE_MANO, origen.indice, destino.indice), LIM_MIN_INDICE, LIM_MAX_INDICE);
-    escribirServoSeguro(servoCorazon, map(paso, 0, PASOS_MOVIMIENTO_SUAVE_MANO, origen.corazon, destino.corazon), LIM_MIN_CORAZON, LIM_MAX_CORAZON);
-    escribirServoSeguro(servoAnularMenique, map(paso, 0, PASOS_MOVIMIENTO_SUAVE_MANO, origen.anularMenique, destino.anularMenique), LIM_MIN_ANULAR_MENIQUE, LIM_MAX_ANULAR_MENIQUE);
-    escribirServoSeguro(servoPulgarVertical, map(paso, 0, PASOS_MOVIMIENTO_SUAVE_MANO, origen.pulgarVertical, destino.pulgarVertical), LIM_MIN_PULGAR_VERTICAL, LIM_MAX_PULGAR_VERTICAL);
-    escribirMuneca(map(paso, 0, PASOS_MOVIMIENTO_SUAVE_MANO, origen.muneca, destino.muneca));
-    escribirServoSeguro(servoCodo, map(paso, 0, PASOS_MOVIMIENTO_SUAVE_MANO, origen.codo, destino.codo), LIM_MIN_CODO, LIM_MAX_CODO);
-    delay(RETARDO_PASO_MS_MANO);
+  int destino[NUM_SERVOS];
+  poseAArray(p, destino);
+
+  float sumaActual = canalesMano[M_INDICE].c.valor + canalesMano[M_CORAZON].c.valor + canalesMano[M_ANULAR].c.valor;
+  float sumaDestino = destino[M_INDICE] + destino[M_CORAZON] + destino[M_ANULAR];
+  bool cerrando = (sumaDestino < sumaActual);
+
+  uint16_t retraso[NUM_SERVOS];
+  retraso[M_CODO] = 0;
+  retraso[M_MUNECA] = 60;
+  retraso[M_PULGAR_VERT] = 120;
+  if (cerrando) {
+    retraso[M_ANULAR] = 100;
+    retraso[M_CORAZON] = 150;
+    retraso[M_INDICE] = 200;
+    retraso[M_PULGAR_FLEX] = 260;
+  } else {
+    retraso[M_INDICE] = 100;
+    retraso[M_CORAZON] = 150;
+    retraso[M_ANULAR] = 200;
+    retraso[M_PULGAR_FLEX] = 120;
   }
+
+  unsigned long fin = 0;
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    int a = constrain(destino[i], canalesMano[i].limMin, canalesMano[i].limMax);
+    unsigned long dur = escalar(DUR_BASE[i], factorVel);
+    unsigned long ret = escalar(retraso[i], factorVel) + random(0, 30);
+    moverCanalConRetraso(canalesMano[i].c, a, dur, ahora, ret);
+    objetivoMano[i] = a;
+    if (ret + dur > fin) {
+      fin = ret + dur;
+    }
+  }
+  return fin;
+}
+
+// Paso de un gesto: todos los servos con la misma duración (el pulgar vertical nunca
+// baja de 600 ms para protegerlo).
+void aplicarPasoGesto(const PoseMano &p, unsigned long durMs, unsigned long ahora) {
+  int destino[NUM_SERVOS];
+  poseAArray(p, destino);
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    int a = constrain(destino[i], canalesMano[i].limMin, canalesMano[i].limMax);
+    unsigned long dur = durMs;
+    if (i == M_PULGAR_VERT && dur < 600) {
+      dur = 600;
+    }
+    moverCanal(canalesMano[i].c, a, dur, ahora);
+    objetivoMano[i] = a;
+  }
+}
+
+// Escribe en los servos de la mano. Los límites de seguridad se aplican SIEMPRE aquí.
+void actualizarCanalesMano(unsigned long ahora) {
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    CanalServoMano &cs = canalesMano[i];
+    if (actualizarCanal(cs.c, ahora)) {
+      int a = redondear(cs.c.valor);
+      a = constrain(a, cs.limMin, cs.limMax);
+      if (a != cs.ultimo) {
+        cs.servo->write(a);
+        cs.ultimo = a;
+      }
+    }
+  }
+}
+
+bool manoMoviendose() {
+  for (uint8_t i = 0; i < NUM_SERVOS; i++) {
+    if (canalesMano[i].c.activo) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// ---------- Gestos ----------
+
+void ejecutarPasoGesto(unsigned long ahora) {
+  const PasoGesto &paso = gestoActual->pasos[pasoGestoActual];
+  aplicarPasoGesto(*paso.pose, paso.durMs, ahora);
+  tSiguientePasoGesto = ahora + paso.durMs + paso.pausaMs;
+}
+
+void iniciarGestoAleatorio(unsigned long ahora) {
+  uint8_t i;
+  do {
+    i = random(0, NUM_GESTOS);
+  } while (i == indiceGestoAnterior && NUM_GESTOS > 1);
+  indiceGestoAnterior = i;
+
+  Serial.print(F("Gesto -> "));
+  Serial.println(GESTOS[i].nombre);
+
+  if (random(100) < 50) {
+    ojosMirarMano(ahora);
+  }
+
+  gestoActual = &GESTOS[i];
+  pasoGestoActual = 0;
+  ejecutarPasoGesto(ahora);
+}
+
+void actualizarGesto(unsigned long ahora) {
+  if (ahora < tSiguientePasoGesto) {
+    return;
+  }
+  pasoGestoActual++;
+  if (pasoGestoActual >= gestoActual->numPasos) {
+    gestoActual = NULL;
+    indicePoseAnteriorMano = 0;    // el gesto termina en "Mano relajada"
+    proximoCambioPose = ahora + escalar(random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS), perfil->factorPoses);
+  } else {
+    ejecutarPasoGesto(ahora);
+  }
+}
+
+// ---------- Micro-movimientos de los dedos en reposo ----------
+
+void microMovimientoMano(unsigned long ahora) {
+  if (MICRO_MANO_AMPLITUD == 0 || ahora < proximoMicroMano) {
+    return;
+  }
+  proximoMicroMano = ahora + random(4000, 9000);
+  if (manoMoviendose()) {
+    return;
+  }
+  uint8_t i = random(M_INDICE, M_ANULAR + 1);      // solo índice, corazón o anular
+  int v = objetivoMano[i] + random(-(int)MICRO_MANO_AMPLITUD, (int)MICRO_MANO_AMPLITUD + 1);
+  v = constrain(v, canalesMano[i].limMin, canalesMano[i].limMax);
+  moverCanal(canalesMano[i].c, v, 900, ahora);
+}
+
+// ---------- Bucle de la mano ----------
+
+void loopMano(unsigned long ahora) {
+  actualizarCanalesMano(ahora);
+
+  if (gestoActual != NULL) {
+    actualizarGesto(ahora);
+    return;
+  }
+  if (durmiendo) {
+    return;
+  }
+
+  if (ahora >= proximoCambioPose) {
+    if (random(100) < perfil->probGesto) {
+      iniciarGestoAleatorio(ahora);
+    } else {
+      uint8_t indiceNuevaPose = elegirPoseDistintaMano(indicePoseAnteriorMano);
+      Serial.print(F("Nueva pose -> "));
+      Serial.println(POSES_MANO[indiceNuevaPose].nombre);
+
+      unsigned long duracion = aplicarPoseMano(POSES_MANO[indiceNuevaPose], perfil->factorVelMano, ahora);
+      indicePoseAnteriorMano = indiceNuevaPose;
+      imprimirPoseMano(POSES_MANO[indiceNuevaPose]);
+
+      proximoCambioPose = ahora + duracion + escalar(random(TIEMPO_MIN_ENTRE_POSES_MS, TIEMPO_MAX_ENTRE_POSES_MS), perfil->factorPoses);
+    }
+  }
+
+  microMovimientoMano(ahora);
 }
