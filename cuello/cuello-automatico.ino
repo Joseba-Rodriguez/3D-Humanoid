@@ -42,8 +42,8 @@ const int NEUTRO = 90;
 
 // Cuánto se separa cada servo de la posición neutra al moverse (grados).
 // Valores bajos a propósito: "que lo mueva poco". Sube esto solo tras probar en vacío.
-const int AMPLITUD_INCLINACION = 12; // ej: 90 -> 102 (activo) / 90 -> 78 (relajado)
-const int AMPLITUD_ROTACION    = 15; // ej: 90 -> 105 (derecha) / 90 -> 75 (izquierda)
+const int AMPLITUD_INCLINACION = 25; // ej: 90 -> 102 (activo) / 90 -> 78 (relajado)
+const int AMPLITUD_ROTACION    = 35; // ej: 90 -> 105 (derecha) / 90 -> 75 (izquierda)
 
 const int INCLINACION_IZQ_ACTIVA  = NEUTRO + AMPLITUD_INCLINACION;
 const int INCLINACION_IZQ_RELAJADA = NEUTRO - (AMPLITUD_INCLINACION / 2);
@@ -73,9 +73,9 @@ const PoseCuello POSES[] = {
 const uint8_t NUM_POSES = sizeof(POSES) / sizeof(POSES[0]);
 
 // ---------- Temporización (todo LENTO por el peso de la cabeza) ----------
-const uint16_t TIEMPO_MIN_ENTRE_MOVIMIENTOS_MS = 5000;
-const uint16_t TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS = 10000;
-const uint16_t PASOS_MOVIMIENTO_SUAVE = 120; // muchos pasos pequeños = movimiento muy suave
+const uint16_t TIEMPO_MIN_ENTRE_MOVIMIENTOS_MS = 3000;
+const uint16_t TIEMPO_MAX_ENTRE_MOVIMIENTOS_MS = 7000;
+const uint16_t PASOS_MOVIMIENTO_SUAVE = 85; // muchos pasos pequeños = movimiento muy suave
 const uint8_t  RETARDO_PASO_MS = 40;         // retardo alto entre pasos = movimiento lento
 
 // ---------- Estado ----------

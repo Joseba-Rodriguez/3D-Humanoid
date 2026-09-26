@@ -16,6 +16,11 @@
   IMPORTANTE: Los ángulos definidos abajo (ABIERTO/CERRADO, CENTRO/LIMITES) son valores
   de partida. Ajusta las constantes según el rango físico real de tus servos y mecanismos
   antes de dejarlo funcionando sin supervisión.
+
+  NOTA: los 4 párpados estaban montados/girados al revés de lo que marcaban las constantes
+  (lo que el código llamaba "abierto" se veía físicamente cerrado, y viceversa). Se han
+  intercambiado los valores de ABIERTO/CERRADO de los 4 servos de párpados para que
+  coincidan con lo que se ve en el robot real.
 */
 
 #include <Servo.h>
@@ -37,15 +42,17 @@ Servo servoOjosVertical;
 Servo servoOjosHorizontal;
 
 // ---------- Ángulos de los párpados (AJUSTAR según montaje) ----------
-const int PARPADO_SUP_IZQ_ABIERTO = 90;
-const int PARPADO_SUP_IZQ_CERRADO = 130;
-const int PARPADO_SUP_DER_ABIERTO = 90;
-const int PARPADO_SUP_DER_CERRADO = 50;
+// Valores intercambiados respecto al original: el giro físico de estos 4 servos
+// estaba invertido, así que ahora ABIERTO/CERRADO se corresponden con lo que se ve.
+const int PARPADO_SUP_IZQ_ABIERTO = 130;
+const int PARPADO_SUP_IZQ_CERRADO = 90;
+const int PARPADO_SUP_DER_ABIERTO = 50;
+const int PARPADO_SUP_DER_CERRADO = 90;
 
-const int PARPADO_INF_IZQ_ABIERTO = 90;
-const int PARPADO_INF_IZQ_CERRADO = 50;
-const int PARPADO_INF_DER_ABIERTO = 90;
-const int PARPADO_INF_DER_CERRADO = 130;
+const int PARPADO_INF_IZQ_ABIERTO = 50;
+const int PARPADO_INF_IZQ_CERRADO = 90;
+const int PARPADO_INF_DER_ABIERTO = 130;
+const int PARPADO_INF_DER_CERRADO = 90;
 
 // ---------- Ángulos de movimiento ocular (AJUSTAR según montaje) ----------
 const int OJOS_VERTICAL_CENTRO   = 90;
@@ -53,8 +60,8 @@ const int OJOS_VERTICAL_ARRIBA   = 70;
 const int OJOS_VERTICAL_ABAJO    = 110;
 
 const int OJOS_HORIZONTAL_CENTRO   = 90;
-const int OJOS_HORIZONTAL_IZQUIERDA = 60;
-const int OJOS_HORIZONTAL_DERECHA   = 120;
+const int OJOS_HORIZONTAL_IZQUIERDA = 70;
+const int OJOS_HORIZONTAL_DERECHA   = 100;
 
 // ---------- Temporización ----------
 const uint16_t PARPADEO_MIN_MS = 2000;   // tiempo mínimo entre parpadeos
