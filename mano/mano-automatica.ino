@@ -162,6 +162,11 @@ const uint16_t TIEMPO_MAX_ENTRE_JUGADAS_MS = 8000;
 const uint8_t  PASOS_MOVIMIENTO_SUAVE = 30; // nº de pasos para interpolar entre poses
 const uint8_t  RETARDO_PASO_MS = 20;        // retardo entre pasos de interpolación
 
+// Sacudida del brazo (arriba/abajo) antes de sacar la jugada, como al contar "piedra, papel o tijera..."
+const uint8_t  SACUDIDAS_CODO = 3;      // nº de veces que sube y baja el brazo antes de la jugada
+const uint8_t  SACUDIDA_PASOS = 10;     // pasos de interpolacion de cada subida/bajada
+const uint8_t  SACUDIDA_RETARDO_MS = 18; // retardo entre pasos de la sacudida
+
 // ---------- Estado ----------
 PoseMano poseActual = POSES[0];
 unsigned long proximoCambioPose = 0;
@@ -259,6 +264,8 @@ void loopPiedraPapelTijera() {
       indiceNuevaJugada = random(0, NUM_JUGADAS_RPS);
     } while (indiceNuevaJugada == indiceJugadaAnterior && NUM_JUGADAS_RPS > 1);
 
+    sacudirBrazoAntesDeJugar();
+
     Serial.print(F("Jugando... -> "));
     Serial.println(JUGADAS_RPS[indiceNuevaJugada].nombre);
 
@@ -269,6 +276,26 @@ void loopPiedraPapelTijera() {
     imprimirPose(JUGADAS_RPS[indiceNuevaJugada]);
 
     proximaJugadaRPS = millis() + random(TIEMPO_MIN_ENTRE_JUGADAS_MS, TIEMPO_MAX_ENTRE_JUGADAS_MS);
+  }
+}
+
+// Sube y baja el brazo (codo) varias veces antes de mostrar la jugada, como al contar
+// "piedra, papel o tijera". Solo mueve el codo; el resto de la mano no cambia todavia.
+void sacudirBrazoAntesDeJugar() {
+  Serial.println(F("Preparando jugada..."));
+  for (uint8_t i = 0; i < SACUDIDAS_CODO; i++) {
+    moverCodoSuave(CODO_ARRIBA);
+    moverCodoSuave(CODO_MEDIO);
+  }
+  poseActual.codo = CODO_MEDIO;
+}
+
+// Interpola solo el servo del codo hasta el angulo indicado (para la sacudida del brazo)
+void moverCodoSuave(int destino) {
+  int origen = servoCodo.read();
+  for (uint8_t paso = 1; paso <= SACUDIDA_PASOS; paso++) {
+    servoCodo.write(map(paso, 0, SACUDIDA_PASOS, origen, destino));
+    delay(SACUDIDA_RETARDO_MS);
   }
 }
 
